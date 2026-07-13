@@ -74,6 +74,22 @@ test("creates a branch and nested worktree from the current branch", async (cont
 	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], result.path), baseCommit);
 });
 
+test("creates worktrees under the main checkout when invoked from another worktree", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const anotherWorktree = await ensureWorktree("another-worktree", repositoryRoot, runGit);
+	await runGitSuccessfully(
+		["-c", "user.name=Pi", "-c", "user.email=pi@example.com", "commit", "--allow-empty", "-m", "Another worktree commit"],
+		anotherWorktree.path,
+	);
+	const sourceCommit = await runGitSuccessfully(["rev-parse", "HEAD"], anotherWorktree.path);
+
+	const result = await ensureWorktree("my-worktree", anotherWorktree.path, runGit);
+
+	assert.equal(result.path, `${repositoryRoot}/.agents/worktrees/my-worktree`);
+	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], result.path), sourceCommit);
+});
+
 test("materializes an empty worktree session with the target cwd", async (context) => {
 	const worktreePath = await mkdtemp(join(tmpdir(), "pi-worktree-session-"));
 	context.after(() => rm(worktreePath, { force: true, recursive: true }));

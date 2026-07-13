@@ -127,13 +127,19 @@ export async function ensureWorktree(
   cwd: string,
   gitRunner: GitRunner,
 ): Promise<WorktreeResult> {
-  const repositoryRoot = await runGit(gitRunner, ["rev-parse", "--show-toplevel"], cwd);
-  await validateBranchName(gitRunner, branch, repositoryRoot);
-  await runGit(gitRunner, ["worktree", "prune", "--expire", "now"], repositoryRoot);
+  const currentWorktreeRoot = await runGit(gitRunner, ["rev-parse", "--show-toplevel"], cwd);
+  await validateBranchName(gitRunner, branch, currentWorktreeRoot);
+  await runGit(gitRunner, ["worktree", "prune", "--expire", "now"], currentWorktreeRoot);
 
-  const targetPath = `${repositoryRoot}/${WORKTREE_DIRECTORY}/${branch}`;
-  const worktreeOutput = await runGit(gitRunner, ["worktree", "list", "--porcelain", "-z"], repositoryRoot);
+  const worktreeOutput = await runGit(
+    gitRunner,
+    ["worktree", "list", "--porcelain", "-z"],
+    currentWorktreeRoot,
+  );
   const worktrees = parseWorktrees(worktreeOutput);
+  const repositoryRoot = worktrees[0]?.path;
+  if (!repositoryRoot) throw new Error("Git returned no worktrees");
+  const targetPath = `${repositoryRoot}/${WORKTREE_DIRECTORY}/${branch}`;
   const targetWorktree = worktrees.find((worktree) => worktree.path === targetPath);
 
   if (targetWorktree) {
@@ -152,7 +158,7 @@ export async function ensureWorktree(
   const branchExists = await localBranchExists(gitRunner, branch, repositoryRoot);
   if (branchExists) await runGit(gitRunner, ["worktree", "add", targetPath, branch], repositoryRoot);
   else {
-    const baseBranch = await getCurrentBranch(gitRunner, repositoryRoot);
+    const baseBranch = await getCurrentBranch(gitRunner, currentWorktreeRoot);
     if (!(await localBranchExists(gitRunner, baseBranch, repositoryRoot)))
       throw new Error(`Current branch ${baseBranch} has no commits`);
     await runGit(gitRunner, ["worktree", "add", "-b", branch, targetPath, baseBranch], repositoryRoot);
