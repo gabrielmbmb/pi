@@ -24,9 +24,7 @@ function gitFailure(arguments_: string[], result: ExecResult): Error {
 
 async function runGit(gitRunner: GitRunner, arguments_: string[], cwd: string): Promise<string> {
   const result = await gitRunner(arguments_, cwd);
-  if (result.code !== 0) {
-    throw gitFailure(arguments_, result);
-  }
+  if (result.code !== 0) throw gitFailure(arguments_, result);
   return result.stdout.trim();
 }
 
@@ -38,9 +36,7 @@ function parseWorktrees(output: string): WorktreeRecord[] {
       const fields = record.split("\0");
       const path = fields.find((field) => field.startsWith("worktree "))?.slice("worktree ".length);
       const branch = fields.find((field) => field.startsWith("branch "))?.slice("branch refs/heads/".length);
-      if (!path) {
-        throw new Error("Git returned a worktree record without a path");
-      }
+      if (!path) throw new Error("Git returned a worktree record without a path");
       return { path, branch };
     });
 }
@@ -48,19 +44,13 @@ function parseWorktrees(output: string): WorktreeRecord[] {
 async function localBranchExists(gitRunner: GitRunner, branch: string, repositoryRoot: string): Promise<boolean> {
   const arguments_ = ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`];
   const result = await gitRunner(arguments_, repositoryRoot);
-  if (result.code === 0) {
-    return true;
-  }
-  if (result.code === 1) {
-    return false;
-  }
+  if (result.code === 0) return true;
+  if (result.code === 1) return false;
   throw gitFailure(arguments_, result);
 }
 
 async function validateBranchName(gitRunner: GitRunner, branch: string, repositoryRoot: string): Promise<void> {
-  if (!branch) {
-    throw new Error("--worktree requires a non-empty branch name");
-  }
+  if (!branch) throw new Error("--worktree requires a non-empty branch name");
   await runGit(gitRunner, ["check-ref-format", "--branch", branch], repositoryRoot);
 }
 
@@ -78,26 +68,21 @@ export async function ensureWorktree(
   const targetWorktree = worktrees.find((worktree) => worktree.path === targetPath);
 
   if (targetWorktree) {
-    if (targetWorktree.branch !== branch) {
+    if (targetWorktree.branch !== branch)
       throw new Error(
         `Worktree path ${targetPath} is already checked out on branch ${targetWorktree.branch ?? "detached HEAD"}`,
       );
-    }
     return { branch, created: false, path: targetPath };
   }
 
   const branchWorktree = worktrees.find((worktree) => worktree.branch === branch);
-  if (branchWorktree) {
-    throw new Error(`Branch ${branch} is already checked out at ${branchWorktree.path}`);
-  }
+  if (branchWorktree) throw new Error(`Branch ${branch} is already checked out at ${branchWorktree.path}`);
 
   const branchExists = await localBranchExists(gitRunner, branch, repositoryRoot);
-  if (branchExists) {
-    await runGit(gitRunner, ["worktree", "add", targetPath, branch], repositoryRoot);
-  } else {
-    if (!(await localBranchExists(gitRunner, BASE_BRANCH, repositoryRoot))) {
+  if (branchExists) await runGit(gitRunner, ["worktree", "add", targetPath, branch], repositoryRoot);
+  else {
+    if (!(await localBranchExists(gitRunner, BASE_BRANCH, repositoryRoot)))
       throw new Error(`Base branch ${BASE_BRANCH} does not exist`);
-    }
     await runGit(gitRunner, ["worktree", "add", "-b", branch, targetPath, BASE_BRANCH], repositoryRoot);
   }
 
