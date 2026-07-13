@@ -1,0 +1,31 @@
+{
+  "name": "@gabrielmbmb/pi-worktree",
+  "version": "0.0.0",
+  "description": "Pi extension for creating and switching to Git worktrees",
+  "type": "module",
+  "files": [
+    "extensions"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "keywords": [
+    "pi-package",
+    "git",
+    "worktree"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/worktree.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.6"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

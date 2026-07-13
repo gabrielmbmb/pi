@@ -1,24 +1,9 @@
 {
-  "name": "@gabrielmbmb/pi",
+  "name": "@gabrielmbmb/pi-workspace",
   "version": "0.0.0",
   "private": true,
-  "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
-  },
-  "keywords": [
-    "pi-package"
-  ],
-  "pi": {
-    "extensions": [
-      "./extensions"
-    ]
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.6"
+    "test": "pnpm --recursive test"
   },
   "packageManager": "pnpm@11.0.8"
 }
