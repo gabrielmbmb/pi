@@ -1,6 +1,14 @@
-import type { ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { existsSync, statSync, writeFileSync } from "node:fs";
 
-const BASE_BRANCH = "main";
+import {
+  SessionManager,
+  type ExecResult,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+
 const WORKTREE_DIRECTORY = ".agents/worktrees";
 const GIT_COMMAND_TIMEOUT_MILLISECONDS = 30_000;
 
@@ -15,6 +23,60 @@ export interface WorktreeResult {
   branch: string;
   created: boolean;
   path: string;
+}
+
+export function removeWorktreeArguments(arguments_: readonly string[]): string[] {
+  const remainingArguments: string[] = [];
+
+  for (let index = 0; index < arguments_.length; index++) {
+    const argument = arguments_[index];
+    if (argument === "--worktree") {
+      index++;
+      continue;
+    }
+    if (argument.startsWith("--worktree=")) continue;
+    remainingArguments.push(argument);
+  }
+
+  return remainingArguments;
+}
+
+export function createWorktreeSession(
+  worktreePath: string,
+  sourceSessionFile?: string,
+  sessionDirectory?: string,
+): string {
+  const sourceSessionIsPersisted =
+    sourceSessionFile && existsSync(sourceSessionFile) && statSync(sourceSessionFile).size > 0;
+  const sessionManager = sourceSessionIsPersisted
+    ? SessionManager.forkFrom(sourceSessionFile, worktreePath, sessionDirectory)
+    : SessionManager.create(worktreePath, sessionDirectory);
+  const sessionFile = sessionManager.getSessionFile();
+  if (!sessionFile) throw new Error(`Unable to create a session in ${worktreePath}`);
+
+  if (!sourceSessionIsPersisted) {
+    const header = sessionManager.getHeader();
+    if (!header) throw new Error(`Unable to create a session header in ${worktreePath}`);
+    writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, { flag: "wx" });
+  }
+
+  return sessionFile;
+}
+
+function runPiInWorktree(worktreePath: string): Promise<number> {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) throw new Error("Unable to determine the Pi CLI entrypoint");
+
+  const arguments_ = [entrypoint, ...removeWorktreeArguments(process.argv.slice(2))];
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, arguments_, {
+      cwd: worktreePath,
+      env: process.env,
+      stdio: "inherit",
+    });
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code ?? 1));
+  });
 }
 
 function gitFailure(arguments_: string[], result: ExecResult): Error {
@@ -54,6 +116,12 @@ async function validateBranchName(gitRunner: GitRunner, branch: string, reposito
   await runGit(gitRunner, ["check-ref-format", "--branch", branch], repositoryRoot);
 }
 
+async function getCurrentBranch(gitRunner: GitRunner, repositoryRoot: string): Promise<string> {
+  const branch = await runGit(gitRunner, ["branch", "--show-current"], repositoryRoot);
+  if (!branch) throw new Error("Cannot create a worktree from a detached HEAD");
+  return branch;
+}
+
 export async function ensureWorktree(
   branch: string,
   cwd: string,
@@ -61,6 +129,7 @@ export async function ensureWorktree(
 ): Promise<WorktreeResult> {
   const repositoryRoot = await runGit(gitRunner, ["rev-parse", "--show-toplevel"], cwd);
   await validateBranchName(gitRunner, branch, repositoryRoot);
+  await runGit(gitRunner, ["worktree", "prune", "--expire", "now"], repositoryRoot);
 
   const targetPath = `${repositoryRoot}/${WORKTREE_DIRECTORY}/${branch}`;
   const worktreeOutput = await runGit(gitRunner, ["worktree", "list", "--porcelain", "-z"], repositoryRoot);
@@ -68,6 +137,8 @@ export async function ensureWorktree(
   const targetWorktree = worktrees.find((worktree) => worktree.path === targetPath);
 
   if (targetWorktree) {
+    if (!existsSync(targetPath))
+      throw new Error(`Worktree ${targetPath} is registered with Git but its directory does not exist`);
     if (targetWorktree.branch !== branch)
       throw new Error(
         `Worktree path ${targetPath} is already checked out on branch ${targetWorktree.branch ?? "detached HEAD"}`,
@@ -81,9 +152,10 @@ export async function ensureWorktree(
   const branchExists = await localBranchExists(gitRunner, branch, repositoryRoot);
   if (branchExists) await runGit(gitRunner, ["worktree", "add", targetPath, branch], repositoryRoot);
   else {
-    if (!(await localBranchExists(gitRunner, BASE_BRANCH, repositoryRoot)))
-      throw new Error(`Base branch ${BASE_BRANCH} does not exist`);
-    await runGit(gitRunner, ["worktree", "add", "-b", branch, targetPath, BASE_BRANCH], repositoryRoot);
+    const baseBranch = await getCurrentBranch(gitRunner, repositoryRoot);
+    if (!(await localBranchExists(gitRunner, baseBranch, repositoryRoot)))
+      throw new Error(`Current branch ${baseBranch} has no commits`);
+    await runGit(gitRunner, ["worktree", "add", "-b", branch, targetPath, baseBranch], repositoryRoot);
   }
 
   return { branch, created: true, path: targetPath };
@@ -91,25 +163,77 @@ export async function ensureWorktree(
 
 export default function worktreeExtension(pi: ExtensionAPI) {
   pi.registerFlag("worktree", {
-    description: `Create a Git worktree and branch from ${BASE_BRANCH}`,
+    description: "Start Pi in a Git worktree created from the current branch",
     type: "string",
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    const branch = pi.getFlag("worktree");
-    if (typeof branch !== "string") return;
+  const gitRunner: GitRunner = (arguments_, cwd) =>
+    pi.exec("git", arguments_, { cwd, timeout: GIT_COMMAND_TIMEOUT_MILLISECONDS });
+  let pendingRelaunchPath: string | undefined;
 
-    const gitRunner: GitRunner = (arguments_, cwd) =>
-      pi.exec("git", arguments_, { cwd, timeout: GIT_COMMAND_TIMEOUT_MILLISECONDS });
-
+  const prepareWorktree = async (branch: string, ctx: ExtensionContext): Promise<WorktreeResult> => {
     try {
-      const result = await ensureWorktree(branch, ctx.cwd, gitRunner);
-      const action = result.created ? "Created" : "Using existing";
-      ctx.ui.notify(`${action} worktree: ${result.path}`, "info");
+      return await ensureWorktree(branch, ctx.cwd, gitRunner);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Unable to prepare worktree: ${message}`, "error");
       throw error;
     }
+  };
+
+  const switchToWorktree = async (
+    branch: string,
+    ctx: ExtensionCommandContext,
+  ): Promise<void> => {
+    const result = await prepareWorktree(branch, ctx);
+    const sourceSessionFile = ctx.sessionManager.getSessionFile();
+    const targetSessionFile = createWorktreeSession(result.path, sourceSessionFile);
+    const action = result.created ? "Created" : "Using existing";
+    const switchResult = await ctx.switchSession(targetSessionFile, {
+      withSession: async (replacementContext) => {
+        // Pi reports every switchSession call as "Resumed session" after this callback returns.
+        setTimeout(() => {
+          replacementContext.ui.notify(`${action} worktree: ${result.path}`, "info");
+        }, 0);
+      },
+    });
+
+    if (switchResult.cancelled)
+      ctx.ui.notify(`${action} worktree, but the session switch was cancelled: ${result.path}`, "warning");
+  };
+
+  pi.on("session_start", async (event, ctx) => {
+    const branch = pi.getFlag("worktree");
+    if (event.reason !== "startup" || typeof branch !== "string") return;
+
+    const result = await prepareWorktree(branch, ctx);
+    if (ctx.mode === "tui" || ctx.mode === "rpc") {
+      // Release Pi's terminal input and restore cooked mode before the child inherits the TTY.
+      pendingRelaunchPath = result.path;
+      ctx.shutdown();
+      return;
+    }
+
+    const exitCode = await runPiInWorktree(result.path);
+    process.exit(exitCode);
+  });
+
+  pi.on("session_shutdown", async (event) => {
+    if (event.reason !== "quit" || !pendingRelaunchPath) return;
+    const worktreePath = pendingRelaunchPath;
+    pendingRelaunchPath = undefined;
+    await runPiInWorktree(worktreePath);
+  });
+
+  pi.registerCommand("worktree", {
+    description: "Create or switch to a Git worktree from the current branch",
+    handler: async (arguments_, ctx) => {
+      const branch = arguments_.trim();
+      if (!branch) {
+        ctx.ui.notify("Usage: /worktree <name>", "warning");
+        return;
+      }
+      await switchToWorktree(branch, ctx);
+    },
   });
 }

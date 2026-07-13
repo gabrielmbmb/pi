@@ -6,4 +6,4 @@ Personal extensions, skills, prompts, and themes for Pi.
 
 | Extension | Description |
 | --- | --- |
-| [`worktree`](extensions/worktree.ts) | Creates or reuses `.agents/worktrees/<name>` on a same-named branch created from `main`. |
+| [`worktree`](extensions/worktree.ts) | Creates or reuses `.agents/worktrees/<name>` from the current checkout branch, then starts or switches Pi to it via `--worktree <name>` or `/worktree <name>`. |
