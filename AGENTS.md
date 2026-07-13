@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-This repository is a pnpm workspace of independently installable Pi packages. Put each extension in `packages/<name>/` with its own `package.json`, Pi manifest, README, source, and tests. Within a package, follow Pi's conventional resource directories (`extensions/`, `skills/`, `prompts/`, and `themes/`).
+This repository contains shared Pi extensions, skills, prompts, and themes. Follow Pi's conventional resource directories (`extensions/`, `skills/`, `prompts/`, and `themes/`).
 
 ## Package Management
 
@@ -16,4 +16,4 @@ if (typeof branch !== "string") return;
 
 ## Extension Documentation
 
-When adding, removing, or renaming an extension package, update the Packages table in the root `README.md` and the package's own README in the same change.
+When adding, removing, or renaming an extension, update the Extensions table in `README.md` in the same change.
