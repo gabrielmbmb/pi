@@ -180,6 +180,7 @@ export async function ensureWorktree(
   cwd: string,
   gitRunner: GitRunner,
   requestedBaseBranch?: string,
+  allowBranchMismatch = false,
 ): Promise<WorktreeResult> {
   const currentWorktreeRoot = await runGit(gitRunner, ["rev-parse", "--show-toplevel"], cwd);
   await validateBranchName(gitRunner, branch, currentWorktreeRoot);
@@ -199,7 +200,7 @@ export async function ensureWorktree(
   if (targetWorktree) {
     if (!existsSync(targetPath))
       throw new Error(`Worktree ${targetPath} is registered with Git but its directory does not exist`);
-    if (targetWorktree.branch !== branch)
+    if (targetWorktree.branch !== branch && !allowBranchMismatch)
       throw new Error(
         `Worktree path ${targetPath} is already checked out on branch ${targetWorktree.branch ?? "detached HEAD"}`,
       );
@@ -247,9 +248,10 @@ export default function worktreeExtension(pi: ExtensionAPI) {
     branch: string,
     ctx: ExtensionContext,
     baseBranch?: string,
+    allowBranchMismatch = false,
   ): Promise<WorktreeResult> => {
     try {
-      return await ensureWorktree(branch, ctx.cwd, gitRunner, baseBranch);
+      return await ensureWorktree(branch, ctx.cwd, gitRunner, baseBranch, allowBranchMismatch);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Unable to prepare worktree: ${message}`, "error");
@@ -285,12 +287,13 @@ export default function worktreeExtension(pi: ExtensionAPI) {
     const baseBranch = pi.getFlag("worktree-base");
     const worktreeSession = pi.getFlag("worktree-session");
 
+    const session = typeof worktreeSession === "string" ? worktreeSession : undefined;
     const result = await prepareWorktree(
       branch,
       ctx,
       typeof baseBranch === "string" ? baseBranch : undefined,
+      session !== undefined,
     );
-    const session = typeof worktreeSession === "string" ? worktreeSession : undefined;
     if (ctx.mode === "tui" || ctx.mode === "rpc") {
       // Release Pi's terminal input and restore cooked mode before the child inherits the TTY.
       pendingRelaunch = { path: result.path, session };

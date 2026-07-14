@@ -320,3 +320,16 @@ test("rejects a target path occupied by another branch", async (context) => {
 		/already checked out on branch other-branch/,
 	);
 });
+
+test("resumes a session when its worktree has switched branches", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const targetPath = `${repositoryRoot}/.agents/worktrees/original-branch`;
+	await runGitSuccessfully(["worktree", "add", "-b", "current-branch", targetPath, "main"], repositoryRoot);
+
+	const result = await ensureWorktree("original-branch", repositoryRoot, runGit, undefined, true);
+
+	assert.equal(result.created, false);
+	assert.equal(result.path, targetPath);
+	assert.equal(await runGitSuccessfully(["branch", "--show-current"], targetPath), "current-branch");
+});
