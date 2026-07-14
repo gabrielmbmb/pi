@@ -10,6 +10,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import worktreeExtension, {
 	createWorktreeSession,
 	ensureWorktree,
+	parseWorktreeCommandArguments,
 	removeWorktreeArguments,
 } from "../extensions/worktree.ts";
 
@@ -52,11 +53,25 @@ test("removes worktree flags before relaunching Pi", () => {
 			"gpt-5",
 			"--worktree",
 			"feature/example",
+			"--worktree-base",
+			"main",
 			"prompt",
 			"--worktree=ignored-duplicate",
+			"--worktree-base=ignored-duplicate",
 		]),
 		["--model", "gpt-5", "prompt"],
 	);
+});
+
+test("parses a base branch option for the slash command", () => {
+	assert.deepEqual(parseWorktreeCommandArguments("feature/example --base release"), {
+		baseBranch: "release",
+		branch: "feature/example",
+	});
+	assert.deepEqual(parseWorktreeCommandArguments("--base=release feature/example"), {
+		baseBranch: "release",
+		branch: "feature/example",
+	});
 });
 
 test("creates a branch and nested worktree from the current branch", async (context) => {
@@ -71,6 +86,21 @@ test("creates a branch and nested worktree from the current branch", async (cont
 	assert.equal(result.created, true);
 	assert.equal(result.path, `${repositoryRoot}/.agents/worktrees/feature/example`);
 	assert.equal(await runGitSuccessfully(["branch", "--show-current"], result.path), "feature/example");
+	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], result.path), baseCommit);
+});
+
+test("creates a new branch from the requested base branch", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const baseCommit = await runGitSuccessfully(["rev-parse", "main"], repositoryRoot);
+	await runGitSuccessfully(["switch", "-c", "current-branch"], repositoryRoot);
+	await runGitSuccessfully(
+		["-c", "user.name=Pi", "-c", "user.email=pi@example.com", "commit", "--allow-empty", "-m", "Current branch commit"],
+		repositoryRoot,
+	);
+
+	const result = await ensureWorktree("from-base", repositoryRoot, runGit, "main");
+
 	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], result.path), baseCommit);
 });
 
@@ -128,6 +158,12 @@ test("creates a worktree session that preserves the current conversation", async
 test("the CLI flag shuts down the parent TUI before relaunching", async (context) => {
 	const repositoryRoot = await createRepository();
 	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const baseCommit = await runGitSuccessfully(["rev-parse", "main"], repositoryRoot);
+	await runGitSuccessfully(["switch", "-c", "current-branch"], repositoryRoot);
+	await runGitSuccessfully(
+		["-c", "user.name=Pi", "-c", "user.email=pi@example.com", "commit", "--allow-empty", "-m", "Current branch commit"],
+		repositoryRoot,
+	);
 	let sessionStartHandler;
 
 	worktreeExtension({
@@ -136,7 +172,8 @@ test("the CLI flag shuts down the parent TUI before relaunching", async (context
 			return runGit(arguments_, options.cwd);
 		},
 		getFlag(name) {
-			return name === "worktree" ? "tui-worktree" : undefined;
+			if (name === "worktree") return "tui-worktree";
+			if (name === "worktree-base") return "main";
 		},
 		on(event, handler) {
 			if (event === "session_start") sessionStartHandler = handler;
@@ -158,18 +195,20 @@ test("the CLI flag shuts down the parent TUI before relaunching", async (context
 	);
 
 	assert.equal(shutdownCalls, 1);
-	assert.equal(
-		await runGitSuccessfully(
-			["branch", "--show-current"],
-			`${repositoryRoot}/.agents/worktrees/tui-worktree`,
-		),
-		"tui-worktree",
-	);
+	const worktreePath = `${repositoryRoot}/.agents/worktrees/tui-worktree`;
+	assert.equal(await runGitSuccessfully(["branch", "--show-current"], worktreePath), "tui-worktree");
+	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], worktreePath), baseCommit);
 });
 
 test("the slash command switches Pi to a session in the worktree", async (context) => {
 	const repositoryRoot = await createRepository();
 	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const baseCommit = await runGitSuccessfully(["rev-parse", "main"], repositoryRoot);
+	await runGitSuccessfully(["switch", "-c", "current-branch"], repositoryRoot);
+	await runGitSuccessfully(
+		["-c", "user.name=Pi", "-c", "user.email=pi@example.com", "commit", "--allow-empty", "-m", "Current branch commit"],
+		repositoryRoot,
+	);
 	const sourceSession = SessionManager.create(repositoryRoot, join(repositoryRoot, ".sessions"));
 	let worktreeCommand;
 	const notifications = [];
@@ -189,7 +228,7 @@ test("the slash command switches Pi to a session in the worktree", async (contex
 
 	let switchedCwd;
 	let targetSessionDirectory;
-	await worktreeCommand.handler("command-worktree", {
+	await worktreeCommand.handler("command-worktree --base main", {
 		cwd: repositoryRoot,
 		sessionManager: sourceSession,
 		switchSession: async (sessionFile, options) => {
@@ -213,6 +252,7 @@ test("the slash command switches Pi to a session in the worktree", async (contex
 		message: `Created worktree: ${repositoryRoot}/.agents/worktrees/command-worktree`,
 		type: "info",
 	});
+	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], switchedCwd), baseCommit);
 });
 
 test("reuses the requested worktree idempotently", async (context) => {

@@ -19,6 +19,11 @@ interface WorktreeRecord {
   branch?: string;
 }
 
+interface WorktreeCommandArguments {
+  baseBranch?: string;
+  branch: string;
+}
+
 export interface WorktreeResult {
   branch: string;
   created: boolean;
@@ -30,15 +35,44 @@ export function removeWorktreeArguments(arguments_: readonly string[]): string[]
 
   for (let index = 0; index < arguments_.length; index++) {
     const argument = arguments_[index];
-    if (argument === "--worktree") {
+    if (argument === "--worktree" || argument === "--worktree-base") {
       index++;
       continue;
     }
-    if (argument.startsWith("--worktree=")) continue;
+    if (argument.startsWith("--worktree=") || argument.startsWith("--worktree-base=")) continue;
     remainingArguments.push(argument);
   }
 
   return remainingArguments;
+}
+
+export function parseWorktreeCommandArguments(arguments_: string): WorktreeCommandArguments {
+  const tokens = arguments_.trim() ? arguments_.trim().split(/\s+/) : [];
+  let baseBranch: string | undefined;
+  let branch: string | undefined;
+
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token === "--base") {
+      const value = tokens[++index];
+      if (!value || value.startsWith("--") || baseBranch)
+        throw new Error("Usage: /worktree <name> [--base <branch>]");
+      baseBranch = value;
+      continue;
+    }
+    if (token.startsWith("--base=")) {
+      const value = token.slice("--base=".length);
+      if (!value || baseBranch) throw new Error("Usage: /worktree <name> [--base <branch>]");
+      baseBranch = value;
+      continue;
+    }
+    if (token.startsWith("-") || branch)
+      throw new Error("Usage: /worktree <name> [--base <branch>]");
+    branch = token;
+  }
+
+  if (!branch) throw new Error("Usage: /worktree <name> [--base <branch>]");
+  return { baseBranch, branch };
 }
 
 export function createWorktreeSession(
@@ -126,6 +160,7 @@ export async function ensureWorktree(
   branch: string,
   cwd: string,
   gitRunner: GitRunner,
+  requestedBaseBranch?: string,
 ): Promise<WorktreeResult> {
   const currentWorktreeRoot = await runGit(gitRunner, ["rev-parse", "--show-toplevel"], cwd);
   await validateBranchName(gitRunner, branch, currentWorktreeRoot);
@@ -158,9 +193,13 @@ export async function ensureWorktree(
   const branchExists = await localBranchExists(gitRunner, branch, repositoryRoot);
   if (branchExists) await runGit(gitRunner, ["worktree", "add", targetPath, branch], repositoryRoot);
   else {
-    const baseBranch = await getCurrentBranch(gitRunner, currentWorktreeRoot);
-    if (!(await localBranchExists(gitRunner, baseBranch, repositoryRoot)))
+    const baseBranch = requestedBaseBranch ?? (await getCurrentBranch(gitRunner, currentWorktreeRoot));
+    await validateBranchName(gitRunner, baseBranch, repositoryRoot);
+    if (!(await localBranchExists(gitRunner, baseBranch, repositoryRoot))) {
+      if (requestedBaseBranch !== undefined)
+        throw new Error(`Base branch ${baseBranch} does not exist or has no commits`);
       throw new Error(`Current branch ${baseBranch} has no commits`);
+    }
     await runGit(gitRunner, ["worktree", "add", "-b", branch, targetPath, baseBranch], repositoryRoot);
   }
 
@@ -169,7 +208,11 @@ export async function ensureWorktree(
 
 export default function worktreeExtension(pi: ExtensionAPI) {
   pi.registerFlag("worktree", {
-    description: "Start Pi in a Git worktree created from the current branch",
+    description: "Start Pi in a Git worktree",
+    type: "string",
+  });
+  pi.registerFlag("worktree-base", {
+    description: "Branch from which to create a new worktree branch",
     type: "string",
   });
 
@@ -177,9 +220,13 @@ export default function worktreeExtension(pi: ExtensionAPI) {
     pi.exec("git", arguments_, { cwd, timeout: GIT_COMMAND_TIMEOUT_MILLISECONDS });
   let pendingRelaunchPath: string | undefined;
 
-  const prepareWorktree = async (branch: string, ctx: ExtensionContext): Promise<WorktreeResult> => {
+  const prepareWorktree = async (
+    branch: string,
+    ctx: ExtensionContext,
+    baseBranch?: string,
+  ): Promise<WorktreeResult> => {
     try {
-      return await ensureWorktree(branch, ctx.cwd, gitRunner);
+      return await ensureWorktree(branch, ctx.cwd, gitRunner, baseBranch);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Unable to prepare worktree: ${message}`, "error");
@@ -190,8 +237,9 @@ export default function worktreeExtension(pi: ExtensionAPI) {
   const switchToWorktree = async (
     branch: string,
     ctx: ExtensionCommandContext,
+    baseBranch?: string,
   ): Promise<void> => {
-    const result = await prepareWorktree(branch, ctx);
+    const result = await prepareWorktree(branch, ctx, baseBranch);
     const sourceSessionFile = ctx.sessionManager.getSessionFile();
     const targetSessionFile = createWorktreeSession(result.path, sourceSessionFile);
     const action = result.created ? "Created" : "Using existing";
@@ -211,8 +259,13 @@ export default function worktreeExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     const branch = pi.getFlag("worktree");
     if (event.reason !== "startup" || typeof branch !== "string") return;
+    const baseBranch = pi.getFlag("worktree-base");
 
-    const result = await prepareWorktree(branch, ctx);
+    const result = await prepareWorktree(
+      branch,
+      ctx,
+      typeof baseBranch === "string" ? baseBranch : undefined,
+    );
     if (ctx.mode === "tui" || ctx.mode === "rpc") {
       // Release Pi's terminal input and restore cooked mode before the child inherits the TTY.
       pendingRelaunchPath = result.path;
@@ -232,14 +285,16 @@ export default function worktreeExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("worktree", {
-    description: "Create or switch to a Git worktree from the current branch",
+    description: "Create or switch to a Git worktree",
     handler: async (arguments_, ctx) => {
-      const branch = arguments_.trim();
-      if (!branch) {
-        ctx.ui.notify("Usage: /worktree <name>", "warning");
+      let parsedArguments: WorktreeCommandArguments;
+      try {
+        parsedArguments = parseWorktreeCommandArguments(arguments_);
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
         return;
       }
-      await switchToWorktree(branch, ctx);
+      await switchToWorktree(parsedArguments.branch, ctx, parsedArguments.baseBranch);
     },
   });
 }
