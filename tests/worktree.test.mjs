@@ -55,11 +55,31 @@ test("removes worktree flags before relaunching Pi", () => {
 			"feature/example",
 			"--worktree-base",
 			"main",
+			"--worktree-session",
+			"ignored-session",
 			"prompt",
 			"--worktree=ignored-duplicate",
 			"--worktree-base=ignored-duplicate",
+			"--worktree-session=ignored-duplicate",
 		]),
 		["--model", "gpt-5", "prompt"],
+	);
+});
+
+test("replaces the parent session when resuming inside a worktree", () => {
+	assert.deepEqual(
+		removeWorktreeArguments(
+			[
+				"--session",
+				"parent-session",
+				"--worktree",
+				"feature/example",
+				"--worktree-session=worktree-session",
+				"prompt",
+			],
+			"worktree-session",
+		),
+		["--session", "worktree-session", "prompt"],
 	);
 });
 

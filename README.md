@@ -31,6 +31,6 @@ Pi clones the package once. To load only selected resources, run `pi config` and
 | Extension | Description |
 | --- | --- |
 | [`banner`](extensions/banner.ts) | Replaces Pi's startup header with an animated rainbow `Pi` banner, loaded-extension names, and loaded context files. |
-| [`worktree`](extensions/worktree.ts) | Creates or reuses `.agents/worktrees/<name>` from the current branch or a selected base via `--worktree <name> --worktree-base <branch>` or `/worktree <name> --base <branch>`, then starts or switches Pi to it. |
+| [`worktree`](extensions/worktree.ts) | Creates or reuses `.agents/worktrees/<name>` from the current branch or a selected base via `--worktree <name> --worktree-base <branch>` or `/worktree <name> --base <branch>`, then starts or switches Pi to it. Resume a worktree session from another checkout with `--worktree <name> --worktree-session <session-id>`. |
 
 The banner expects Pi's native startup listing to be disabled with `"quietStartup": true` in `~/.pi/agent/settings.json` (or via `/settings`).

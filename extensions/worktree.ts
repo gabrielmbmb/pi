@@ -30,19 +30,35 @@ export interface WorktreeResult {
   path: string;
 }
 
-export function removeWorktreeArguments(arguments_: readonly string[]): string[] {
+export function removeWorktreeArguments(
+  arguments_: readonly string[],
+  worktreeSession?: string,
+): string[] {
   const remainingArguments: string[] = [];
 
   for (let index = 0; index < arguments_.length; index++) {
     const argument = arguments_[index];
-    if (argument === "--worktree" || argument === "--worktree-base") {
+    if (
+      argument === "--worktree" ||
+      argument === "--worktree-base" ||
+      argument === "--worktree-session" ||
+      (worktreeSession !== undefined && argument === "--session")
+    ) {
       index++;
       continue;
     }
-    if (argument.startsWith("--worktree=") || argument.startsWith("--worktree-base=")) continue;
+    if (
+      argument.startsWith("--worktree=") ||
+      argument.startsWith("--worktree-base=") ||
+      argument.startsWith("--worktree-session=") ||
+      (worktreeSession !== undefined && argument.startsWith("--session="))
+    )
+      continue;
     remainingArguments.push(argument);
   }
 
+  if (worktreeSession !== undefined)
+    remainingArguments.unshift("--session", worktreeSession);
   return remainingArguments;
 }
 
@@ -97,11 +113,14 @@ export function createWorktreeSession(
   return sessionFile;
 }
 
-function runPiInWorktree(worktreePath: string): Promise<number> {
+function runPiInWorktree(worktreePath: string, worktreeSession?: string): Promise<number> {
   const entrypoint = process.argv[1];
   if (!entrypoint) throw new Error("Unable to determine the Pi CLI entrypoint");
 
-  const arguments_ = [entrypoint, ...removeWorktreeArguments(process.argv.slice(2))];
+  const arguments_ = [
+    entrypoint,
+    ...removeWorktreeArguments(process.argv.slice(2), worktreeSession),
+  ];
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, arguments_, {
       cwd: worktreePath,
@@ -215,10 +234,14 @@ export default function worktreeExtension(pi: ExtensionAPI) {
     description: "Branch from which to create a new worktree branch",
     type: "string",
   });
+  pi.registerFlag("worktree-session", {
+    description: "Resume a session after starting Pi in the worktree",
+    type: "string",
+  });
 
   const gitRunner: GitRunner = (arguments_, cwd) =>
     pi.exec("git", arguments_, { cwd, timeout: GIT_COMMAND_TIMEOUT_MILLISECONDS });
-  let pendingRelaunchPath: string | undefined;
+  let pendingRelaunch: { path: string; session?: string } | undefined;
 
   const prepareWorktree = async (
     branch: string,
@@ -260,28 +283,30 @@ export default function worktreeExtension(pi: ExtensionAPI) {
     const branch = pi.getFlag("worktree");
     if (event.reason !== "startup" || typeof branch !== "string") return;
     const baseBranch = pi.getFlag("worktree-base");
+    const worktreeSession = pi.getFlag("worktree-session");
 
     const result = await prepareWorktree(
       branch,
       ctx,
       typeof baseBranch === "string" ? baseBranch : undefined,
     );
+    const session = typeof worktreeSession === "string" ? worktreeSession : undefined;
     if (ctx.mode === "tui" || ctx.mode === "rpc") {
       // Release Pi's terminal input and restore cooked mode before the child inherits the TTY.
-      pendingRelaunchPath = result.path;
+      pendingRelaunch = { path: result.path, session };
       ctx.shutdown();
       return;
     }
 
-    const exitCode = await runPiInWorktree(result.path);
+    const exitCode = await runPiInWorktree(result.path, session);
     process.exit(exitCode);
   });
 
   pi.on("session_shutdown", async (event) => {
-    if (event.reason !== "quit" || !pendingRelaunchPath) return;
-    const worktreePath = pendingRelaunchPath;
-    pendingRelaunchPath = undefined;
-    await runPiInWorktree(worktreePath);
+    if (event.reason !== "quit" || !pendingRelaunch) return;
+    const relaunch = pendingRelaunch;
+    pendingRelaunch = undefined;
+    await runPiInWorktree(relaunch.path, relaunch.session);
   });
 
   pi.registerCommand("worktree", {
