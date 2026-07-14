@@ -43,8 +43,21 @@ test("lists the context files loaded by Pi", async (context) => {
 	]);
 });
 
-test("replaces the startup header with a rainbow Pi banner", async () => {
+test("replaces the startup header with a rainbow Pi banner", async (context) => {
+	let intervalCallback;
+	let intervalCleared = false;
+	context.mock.method(globalThis, "setInterval", (callback, delay) => {
+		assert.equal(delay, 80);
+		intervalCallback = callback;
+		return 1;
+	});
+	context.mock.method(globalThis, "clearInterval", (timer) => {
+		assert.equal(timer, 1);
+		intervalCleared = true;
+	});
+
 	let sessionStartHandler;
+	let messageStartHandler;
 	bannerExtension({
 		getAllTools() {
 			return [{ sourceInfo: { path: "/extensions/worktree.ts", source: "local" } }];
@@ -54,9 +67,11 @@ test("replaces the startup header with a rainbow Pi banner", async () => {
 		},
 		on(event, handler) {
 			if (event === "session_start") sessionStartHandler = handler;
+			if (event === "message_start") messageStartHandler = handler;
 		},
 	});
 	assert.ok(sessionStartHandler);
+	assert.ok(messageStartHandler);
 
 	let headerFactory;
 	await sessionStartHandler(
@@ -64,6 +79,7 @@ test("replaces the startup header with a rainbow Pi banner", async () => {
 		{
 			cwd: process.cwd(),
 			mode: "tui",
+			sessionManager: { getEntries: () => [] },
 			ui: {
 				setHeader(factory) {
 					headerFactory = factory;
@@ -73,10 +89,16 @@ test("replaces the startup header with a rainbow Pi banner", async () => {
 	);
 	assert.ok(headerFactory);
 
+	let renderRequests = 0;
 	const header = headerFactory(
-		{ requestRender() {} },
+		{ requestRender() { renderRequests++; } },
 		{ fg(_color, text) { return text; } },
 	);
+	assert.ok(intervalCallback);
+	intervalCallback();
+	assert.equal(renderRequests, 1);
+	messageStartHandler();
+	assert.equal(intervalCleared, true);
 	const lines = header.render(80);
 	const rendered = lines.map(stripAnsi);
 
@@ -95,5 +117,40 @@ test("replaces the startup header with a rainbow Pi banner", async () => {
 	assert.ok(header.render(10).map(stripAnsi).every((line) => line.length <= 10));
 	assert.ok(rendered.some((line) => line.trim() === "extensions loaded: banner, worktree"));
 	assert.ok(rendered.some((line) => line.trim().startsWith("context files: ")));
+	header.dispose();
+});
+
+test("does not animate a banner above an existing conversation", async (context) => {
+	let intervalStarted = false;
+	context.mock.method(globalThis, "setInterval", () => {
+		intervalStarted = true;
+		return 1;
+	});
+
+	let sessionStartHandler;
+	bannerExtension({
+		getAllTools: () => [],
+		getCommands: () => [],
+		on(event, handler) {
+			if (event === "session_start") sessionStartHandler = handler;
+		},
+	});
+
+	let headerFactory;
+	await sessionStartHandler(
+		{},
+		{
+			cwd: process.cwd(),
+			mode: "tui",
+			sessionManager: { getEntries: () => [{ type: "message" }] },
+			ui: { setHeader: (factory) => { headerFactory = factory; } },
+		},
+	);
+	const header = headerFactory(
+		{ requestRender() {} },
+		{ fg(_color, text) { return text; } },
+	);
+
+	assert.equal(intervalStarted, false);
 	header.dispose();
 });

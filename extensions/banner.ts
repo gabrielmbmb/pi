@@ -98,7 +98,7 @@ class PiBanner {
 	private readonly theme: Theme;
 	private readonly extensions: readonly string[];
 	private readonly contextFiles: readonly string[];
-	private animationTimer: ReturnType<typeof setInterval>;
+	private animationTimer?: ReturnType<typeof setInterval>;
 	private frame = 0;
 
 	constructor(
@@ -106,19 +106,28 @@ class PiBanner {
 		theme: Theme,
 		extensions: readonly string[],
 		contextFiles: readonly string[],
+		animate: boolean,
 	) {
 		this.tui = tui;
 		this.theme = theme;
 		this.extensions = extensions;
 		this.contextFiles = contextFiles;
-		this.animationTimer = setInterval(() => {
-			this.frame++;
-			this.tui.requestRender();
-		}, 80);
+		if (animate) {
+			this.animationTimer = setInterval(() => {
+				this.frame++;
+				this.tui.requestRender();
+			}, 80);
+		}
+	}
+
+	stopAnimation(): void {
+		if (this.animationTimer === undefined) return;
+		clearInterval(this.animationTimer);
+		this.animationTimer = undefined;
 	}
 
 	dispose(): void {
-		clearInterval(this.animationTimer);
+		this.stopAnimation();
 	}
 
 	invalidate(): void {}
@@ -158,11 +167,26 @@ class PiBanner {
 }
 
 export default function bannerExtension(pi: ExtensionAPI): void {
+	let banner: PiBanner | undefined;
+
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
 		const extensions = getLoadedExtensionNames(pi.getCommands(), pi.getAllTools());
 		const contextFiles = getLoadedContextFiles(ctx.cwd);
-		ctx.ui.setHeader((tui, theme) => new PiBanner(tui, theme, extensions, contextFiles));
+		const hasConversation = ctx.sessionManager.getEntries().some((entry) => entry.type === "message");
+		ctx.ui.setHeader((tui, theme) => {
+			banner = new PiBanner(tui, theme, extensions, contextFiles, !hasConversation);
+			return banner;
+		});
+	});
+
+	pi.on("message_start", () => {
+		banner?.stopAnimation();
+	});
+
+	pi.on("session_shutdown", () => {
+		banner?.dispose();
+		banner = undefined;
 	});
 }
