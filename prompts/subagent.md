@@ -21,8 +21,13 @@ Once a model pattern is known (whether supplied by the user or chosen as a defau
 pi --list-models | grep <pattern>
 ```
 
-- `pi --list-models` prints every configured model with its exact provider/model ID. Pipe it through `grep` (use `grep -i` for case-insensitive, or a more specific pattern as needed) to filter for the requested model.
-- If exactly one model matches, use that exact model ID (or the original pattern) in Step 2.
+- `pi --list-models` prints every configured model as two columns — `provider` and `model` — followed by capabilities. For example:
+  ```
+  openrouter    z-ai/glm-5.2   1.0M   131.1K   yes   no
+  ```
+  Pipe it through `grep` (use `grep -i` for case-insensitive, or a more specific pattern as needed) to filter for the requested model.
+- **Always pass the fully-qualified ID `<provider>/<model>` to `--model` in Step 2** — i.e. join the `provider` and `model` columns with a `/` (e.g. `openrouter/z-ai/glm-5.2`). Passing the bare model ID without the provider prefix causes `pi` to mis-resolve the model and fail with a confusing "No API key found for <wrong provider>" error. The only exception is a single-model provider like `anthropic` where the bare name is unambiguous, but the fully-qualified form is always safe.
+- If exactly one model matches, use that fully-qualified ID in Step 2.
 - If multiple models match, pick the most relevant one (prefer an exact or closest ID match) and proceed — you do not need to ask the user to disambiguate unless the matches are genuinely ambiguous or span different providers in a way that matters.
 - If **no** models match, report this to the user and ask whether to retry with a different model, log in to the relevant provider, or give up. Do not attempt to spawn with a model that is not configured.
 
@@ -31,11 +36,12 @@ pi --list-models | grep <pattern>
 Run a non-interactive `pi` process in the current working directory via the bash tool. Use the resolved model and reasoning level. Example shape:
 
 ```bash
-pi -p --no-session --model "<pattern>" --thinking <level> "<task>"
+pi -p --no-session --model "<provider>/<model>" --thinking <level> "<task>"
 ```
 
 - Use `-p` (`--print`) so the child runs to completion and prints its response, then exits.
 - Use `--no-session` so the child is ephemeral and doesn't pollute session history.
+- `--model` must be the fully-qualified `<provider>/<model>` ID resolved in Step 1 (e.g. `openrouter/z-ai/glm-5.2`). Do **not** pass the bare model ID — it will mis-resolve and fail.
 - Pass the task verbatim as the final positional argument (the full `$@` task, minus any `--model`/`--reasoning` flags you consumed in step 1).
 - Quote the task and any flag values so shell metacharacters are safe. Prefer a single-quoted heredoc or `printf '%s'` if the task contains quotes or backticks.
 - Do **not** add `--approve`/`-a`; let the child inherit the normal project-trust behavior. Only add it if the user explicitly asks to trust project-local resources for the subagent.
