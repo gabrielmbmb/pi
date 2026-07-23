@@ -15,6 +15,17 @@ Parse the user's input for an explicit model and reasoning/thinking level:
 
 If the user did **not** specify both a model and a reasoning level, ask them using the `ask_question` tool before spawning. Suggest reasonable defaults (e.g. a strong general model with `medium` reasoning) but let them choose. Do not guess silently.
 
+Once a model pattern is known (whether supplied by the user or chosen as a default), resolve it to a concrete, available model before spawning. Run, via the bash tool:
+
+```bash
+pi --list-models | grep <pattern>
+```
+
+- `pi --list-models` prints every configured model with its exact provider/model ID. Pipe it through `grep` (use `grep -i` for case-insensitive, or a more specific pattern as needed) to filter for the requested model.
+- If exactly one model matches, use that exact model ID (or the original pattern) in Step 2.
+- If multiple models match, pick the most relevant one (prefer an exact or closest ID match) and proceed — you do not need to ask the user to disambiguate unless the matches are genuinely ambiguous or span different providers in a way that matters.
+- If **no** models match, report this to the user and ask whether to retry with a different model, log in to the relevant provider, or give up. Do not attempt to spawn with a model that is not configured.
+
 ## Step 2 — Self-spawn the subagent
 
 Run a non-interactive `pi` process in the current working directory via the bash tool. Use the resolved model and reasoning level. Example shape:
