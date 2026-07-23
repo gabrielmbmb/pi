@@ -34,3 +34,9 @@ Pi clones the package once. To load only selected resources, run `pi config` and
 | [`worktree`](extensions/worktree.ts) | Creates or reuses `.agents/worktrees/<name>` from the current branch or a selected base via `--worktree <name> --worktree-base <branch>` or `/worktree <name> --base <branch>`, then starts or switches Pi to it. Resume a worktree session from another checkout with `--worktree <name> --worktree-session <session-id>`. |
 
 The banner expects Pi's native startup listing to be disabled with `"quietStartup": true` in `~/.pi/agent/settings.json` (or via `/settings`).
+
+## Prompts
+
+| Prompt | Description |
+| --- | --- |
+| [`subagent`](prompts/subagent.md) | Self-spawns an isolated `pi` subprocess to own a task end-to-end, asking for model/reasoning if omitted, e.g. `/subagent --model sonnet --reasoning high check the PR review and address the comments`. |
