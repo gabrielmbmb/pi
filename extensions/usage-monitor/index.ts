@@ -8,10 +8,12 @@
  * Supported providers:
  * - openrouter
  * - openai-codex
+ * - opencode-go
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { codexHandler, consumeResetCredit, fetchResetCreditDetails } from "./providers/codex.ts";
+import { opencodeGoHandler } from "./providers/opencode-go.ts";
 import { openRouterHandler } from "./providers/openrouter.ts";
 import type { ProviderUsageHandler, UsageInfo } from "./providers/types.ts";
 
@@ -20,6 +22,7 @@ export default function usageMonitor(pi: ExtensionAPI) {
   const handlers = new Map<string, ProviderUsageHandler>();
   handlers.set(codexHandler.provider, codexHandler);
   handlers.set(openRouterHandler.provider, openRouterHandler);
+  handlers.set(opencodeGoHandler.provider, opencodeGoHandler);
 
   // ── Throttle state ────────────────────────────────────────────────
   const FETCH_COOLDOWN_MS = 60_000; // at most one API call per minute
@@ -34,7 +37,10 @@ export default function usageMonitor(pi: ExtensionAPI) {
     ctx: ExtensionContext,
   ): Promise<string | undefined> {
     const auth = await ctx.modelRegistry.getProviderAuth(provider);
-    return auth?.auth.apiKey;
+    if (auth?.auth.apiKey) return auth.auth.apiKey;
+
+    // Fall back to provider-specific resolution (e.g. OpenCode Go's auth.json)
+    return handlers.get(provider)?.resolveApiKey?.(ctx);
   }
 
   function showWidget(
