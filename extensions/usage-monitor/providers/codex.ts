@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ProviderUsageHandler, UsageInfo } from "./types.ts";
+import type { ProviderUsageHandler, UsageInfo, UsageWindow } from "./types.ts";
 
 // ── Response shapes ─────────────────────────────────────────────────
 
@@ -13,8 +13,8 @@ interface WhamWindow {
 interface WhamRateLimit {
   allowed?: boolean;
   limit_reached?: boolean;
-  primary_window?: WhamWindow;
-  secondary_window?: WhamWindow;
+  primary_window?: WhamWindow | null;
+  secondary_window?: WhamWindow | null;
 }
 
 interface WhamCredits {
@@ -110,11 +110,27 @@ async function fetchWhamUsage(
   }
 }
 
+function toUsageWindow(
+  label: string,
+  window: WhamWindow | null | undefined,
+): UsageWindow | undefined {
+  if (typeof window?.used_percent !== "number") return undefined;
+  return {
+    label,
+    percent: window.used_percent,
+    resetsAt: window.reset_at ? window.reset_at * 1000 : undefined,
+  };
+}
+
 function mapWhamToUsage(wham: WhamUsageResponse): UsageInfo {
   const primary = wham.rate_limit?.primary_window;
   const credits = wham.credits;
   const resetCredits = wham.rate_limit_reset_credits;
   const spend = wham.spend_control;
+  const windows = [
+    toUsageWindow("Session", primary),
+    toUsageWindow("Weekly", wham.rate_limit?.secondary_window),
+  ].filter((window): window is UsageWindow => window !== undefined);
 
   // Determine if any limit has been reached
   const rateReached = wham.rate_limit?.limit_reached;
@@ -133,6 +149,7 @@ function mapWhamToUsage(wham: WhamUsageResponse): UsageInfo {
     extraCredits: resetCredits?.available_count,
     balance: credits?.balance != null ? Number(credits.balance) : undefined,
     limitReached,
+    windows,
   };
 }
 
@@ -205,40 +222,58 @@ export const codexHandler: ProviderUsageHandler = {
 
   formatWidget(usage: UsageInfo, ctx: ExtensionContext): string[] {
     const theme = ctx.ui.theme;
-    const parts: string[] = [theme.fg("accent", "Codex")];
+    const usageParts: string[] = [theme.fg("accent", "Codex")];
+    const detailParts: string[] = [];
 
     // Plan tier
     if (usage.planType) {
-      parts.push(theme.fg("text", `Plan: ${usage.planType}`));
+      usageParts.push(theme.fg("text", `Plan: ${usage.planType}`));
     }
 
-    // Usage percentage + reset time
-    if (typeof usage.usagePercent === "number") {
-      const pct = usage.usagePercent.toFixed(0);
-      const color = usage.usagePercent > 90 ? "warning" : "text";
-      parts.push(theme.fg(color, `${pct}% used`));
+    const windows = usage.windows?.length
+      ? usage.windows
+      : typeof usage.usagePercent === "number"
+        ? [{ label: "Session", percent: usage.usagePercent, resetsAt: usage.resetsAt }]
+        : [];
 
-      if (usage.resetsAt) {
-        const mins = Math.max(0, Math.round((usage.resetsAt - Date.now()) / 60000));
-        if (mins > 0) {
-          const hr = Math.floor(mins / 60);
-          const min = mins % 60;
-          const when = hr > 0 ? `${hr}h ${min}m` : `${min}m`;
-          parts.push(theme.fg("dim", `resets in ${when}`));
-        }
-      }
+    // Keep both percentages together on the first line so neither is pushed
+    // out of view by reset details on narrower terminals.
+    for (const window of windows) {
+      const pct = window.percent.toFixed(0);
+      const color = window.percent > 90 ? "warning" : "text";
+      usageParts.push(theme.fg(color, `${window.label} ${pct}% used`));
+    }
+
+    for (const window of windows) {
+      if (!window.resetsAt) continue;
+
+      const mins = Math.max(0, Math.round((window.resetsAt - Date.now()) / 60000));
+      if (mins <= 0) continue;
+
+      const days = Math.floor(mins / 1440);
+      const hours = Math.floor((mins % 1440) / 60);
+      const min = mins % 60;
+      const when = days > 0
+        ? `${days}d ${hours}h`
+        : hours > 0
+          ? `${hours}h ${min}m`
+          : `${min}m`;
+      detailParts.push(theme.fg("dim", `${window.label} resets in ${when}`));
     }
 
     // Extra credits
     if (typeof usage.extraCredits === "number" && usage.extraCredits > 0) {
-      parts.push(theme.fg("muted", "✦") + theme.fg("dim", `${usage.extraCredits} reset credit${usage.extraCredits !== 1 ? "s" : ""}`));
+      detailParts.push(theme.fg("muted", "✦") + theme.fg("dim", `${usage.extraCredits} reset credit${usage.extraCredits !== 1 ? "s" : ""}`));
     }
 
     // Limit reached indicator
     if (usage.limitReached) {
-      parts.push(theme.fg("warning", "● limit reached"));
+      detailParts.push(theme.fg("warning", "● limit reached"));
     }
 
-    return [parts.join("  ")];
+    return [
+      usageParts.join("  "),
+      ...(detailParts.length > 0 ? [detailParts.join("  ")] : []),
+    ];
   },
 };
