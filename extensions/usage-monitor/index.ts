@@ -26,9 +26,12 @@ export default function usageMonitor(pi: ExtensionAPI) {
 
   // ── Throttle state ────────────────────────────────────────────────
   const FETCH_COOLDOWN_MS = 60_000; // at most one API call per minute
+  const REFRESH_POLL_INTERVAL_MS = 30_000; // also refresh while a tool is running
   let lastFetch = 0;
   let lastUsage: UsageInfo | null = null;
   let activeProvider: string | null = null;
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  let refreshContext: ExtensionContext | undefined;
 
   // ── Internal helpers ──────────────────────────────────────────────
 
@@ -112,6 +115,17 @@ export default function usageMonitor(pi: ExtensionAPI) {
   // ── Events ────────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    refreshContext = ctx;
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => {
+      const provider = activeProvider;
+      if (provider && handlers.has(provider) && refreshContext) {
+        void refresh(provider, refreshContext).catch((err) => {
+          console.error("[usage-monitor] background refresh:", err);
+        });
+      }
+    }, REFRESH_POLL_INTERVAL_MS);
+
     const provider = ctx.model?.provider;
     if (provider && handlers.has(provider)) {
       await refresh(provider, ctx, true);
@@ -134,6 +148,14 @@ export default function usageMonitor(pi: ExtensionAPI) {
     if (activeProvider && handlers.has(activeProvider)) {
       await refresh(activeProvider, ctx);
     }
+  });
+
+  pi.on("session_shutdown", () => {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = undefined;
+    }
+    refreshContext = undefined;
   });
 
   // ── Commands ──────────────────────────────────────────────────────
