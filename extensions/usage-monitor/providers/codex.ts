@@ -41,6 +41,68 @@ interface WhamUsageResponse {
   spend_control?: WhamSpendControl | null;
 }
 
+const CODEX_PLAN_LABELS: Record<string, string> = {
+  free: "Free",
+  go: "Go",
+  plus: "Plus",
+  pro: "Pro",
+  prolite: "Pro Lite",
+  team: "Business",
+  self_serve_business_prolite: "Business Premium",
+  self_serve_business_usage_based: "Business",
+  business: "Business",
+  ent26: "Enterprise",
+  enterprise_cbp_automation: "Enterprise (Automation)",
+  enterprise_cbp_usage_based: "Enterprise",
+  enterprise: "Enterprise",
+  edu: "Edu",
+  education: "Edu",
+  edu_plus: "Edu Plus",
+  edu_pro: "Edu Pro",
+};
+
+/** Convert Codex's backend plan enum into the label users should see. */
+export function formatCodexPlanType(planType: string): string {
+  const normalized = planType.trim().toLowerCase();
+  const knownLabel = CODEX_PLAN_LABELS[normalized];
+  if (typeof knownLabel === "string") return knownLabel;
+
+  // Keep newly introduced backend values readable until they are added above.
+  return normalized
+    .split("_")
+    .map((word) => word ? word[0].toUpperCase() + word.slice(1) : word)
+    .join(" ");
+}
+
+function isApproximately(value: number, target: number): boolean {
+  return Math.abs(value - target) <= target * 0.05;
+}
+
+/** Format the server-provided rate-limit duration instead of calling it a session. */
+export function formatCodexWindowLabel(
+  limitWindowSeconds: number | undefined,
+  fallback: string,
+): string {
+  if (
+    typeof limitWindowSeconds !== "number" ||
+    !Number.isFinite(limitWindowSeconds) ||
+    limitWindowSeconds <= 0
+  )
+    return fallback;
+
+  const seconds = Math.round(limitWindowSeconds);
+  if (isApproximately(seconds, 5 * 60 * 60)) return "5h";
+  if (isApproximately(seconds, 24 * 60 * 60)) return "Daily";
+  if (isApproximately(seconds, 7 * 24 * 60 * 60)) return "Weekly";
+  if (isApproximately(seconds, 30 * 24 * 60 * 60)) return "Monthly";
+  if (isApproximately(seconds, 365 * 24 * 60 * 60)) return "Annual";
+
+  if (seconds >= 60 * 60 && seconds % (60 * 60) === 0)
+    return `${seconds / (60 * 60)}h`;
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
 // ── JWT helpers ─────────────────────────────────────────────────────
 
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
@@ -127,9 +189,13 @@ function mapWhamToUsage(wham: WhamUsageResponse): UsageInfo {
   const credits = wham.credits;
   const resetCredits = wham.rate_limit_reset_credits;
   const spend = wham.spend_control;
+  const secondary = wham.rate_limit?.secondary_window;
   const windows = [
-    toUsageWindow("Session", primary),
-    toUsageWindow("Weekly", wham.rate_limit?.secondary_window),
+    toUsageWindow(formatCodexWindowLabel(primary?.limit_window_seconds, "Usage"), primary),
+    toUsageWindow(
+      formatCodexWindowLabel(secondary?.limit_window_seconds, "Secondary usage"),
+      secondary,
+    ),
   ].filter((window): window is UsageWindow => window !== undefined);
 
   // Determine if any limit has been reached
@@ -227,13 +293,13 @@ export const codexHandler: ProviderUsageHandler = {
 
     // Plan tier
     if (usage.planType) {
-      usageParts.push(theme.fg("text", `Plan: ${usage.planType}`));
+      usageParts.push(theme.fg("text", `Plan: ${formatCodexPlanType(usage.planType)}`));
     }
 
     const windows = usage.windows?.length
       ? usage.windows
       : typeof usage.usagePercent === "number"
-        ? [{ label: "Session", percent: usage.usagePercent, resetsAt: usage.resetsAt }]
+        ? [{ label: "Usage", percent: usage.usagePercent, resetsAt: usage.resetsAt }]
         : [];
 
     // Keep both percentages together on the first line so neither is pushed
