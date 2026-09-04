@@ -7,10 +7,17 @@ settings:
 importers:
 
   .:
+    dependencies:
+      pi-vim:
+        specifier: 0.14.1
+        version: 0.14.1(@earendil-works/pi-coding-agent@0.80.6(ws@8.21.0)(zod@4.4.3))(@earendil-works/pi-tui@0.80.6)
     devDependencies:
       '@earendil-works/pi-coding-agent':
         specifier: ^0.80.6
         version: 0.80.6(ws@8.21.0)(zod@4.4.3)
+      '@earendil-works/pi-tui':
+        specifier: ^0.80.6
+        version: 0.80.6
 
 packages:
 
@@ -498,6 +505,12 @@ packages:
   path-scurry@2.0.2:
     resolution: {integrity: sha512-3O/iVVsJAPsOnpwWIeD+d6z/7PmqApyQePUtCndjatj/9I5LylHvt5qluFaBT3I5h3r1ejfR056c+FCv+NnNXg==}
     engines: {node: 18 || 20 || >=22}
+
+  pi-vim@0.14.1:
+    resolution: {integrity: sha512-m8/j84pGlu01b6aucqgDQQQcS4kU+B0ws6/LIKB/HMWb43xVFXLqdZN06Op5OhBm+9aDDUkzFfFp3ErrtwLNRQ==}
+    peerDependencies:
+      '@earendil-works/pi-coding-agent': '*'
+      '@earendil-works/pi-tui': '>=0.74.0'
 
   proper-lockfile@4.1.2:
     resolution: {integrity: sha512-TjNPblN4BwAWMXU8s9AEz4JmQxnD1NNL7bNOY/AKUzyamc379FWASUhc/K1pL2noVb+XmZKLL68cjzLsiOAMaA==}
@@ -1201,6 +1214,11 @@ snapshots:
     dependencies:
       lru-cache: 11.5.2
       minipass: 7.1.3
+
+  pi-vim@0.14.1(@earendil-works/pi-coding-agent@0.80.6(ws@8.21.0)(zod@4.4.3))(@earendil-works/pi-tui@0.80.6):
+    dependencies:
+      '@earendil-works/pi-coding-agent': 0.80.6(ws@8.21.0)(zod@4.4.3)
+      '@earendil-works/pi-tui': 0.80.6
 
   proper-lockfile@4.1.2:
     dependencies:
