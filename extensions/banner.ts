@@ -18,6 +18,7 @@ const RAINBOW_COLORS = [
 	[178, 141, 255],
 ] as const;
 const RESET = "\x1b[0m";
+const ANIMATION_INTERVAL_MS = 80;
 const BANNER_WIDTH = 18;
 const PI_PIXELS = [
 	"   ▄███████▄  ▄█  ",
@@ -29,6 +30,20 @@ const PI_PIXELS = [
 	"  ███        ███  ",
 	" ▄████▀      █▀   ",
 ].map((line) => line.padEnd(BANNER_WIDTH));
+const BOTTOM_ROW = PI_PIXELS.length - 1;
+const BOTTOM_RIGHT_PIXEL_COLUMN = [...PI_PIXELS[BOTTOM_ROW]!].findLastIndex((pixel) => pixel !== " ");
+// Projecting each pixel onto this diagonal produces a bottom-right to top-left sweep.
+const STOP_WAVE_DISTANCE = Math.max(
+	...PI_PIXELS.flatMap((line, row) =>
+		[...line].flatMap((pixel, column) =>
+			pixel === " " ? [] : [BOTTOM_RIGHT_PIXEL_COLUMN - column + BOTTOM_ROW - row],
+		),
+	),
+);
+
+function waveDistance(column: number, row: number): number {
+	return BOTTOM_RIGHT_PIXEL_COLUMN - column + BOTTOM_ROW - row;
+}
 
 interface ExtensionCommand {
 	source: string;
@@ -99,6 +114,8 @@ class PiBanner {
 	private readonly extensions: readonly string[];
 	private readonly contextFiles: readonly string[];
 	private animationTimer?: ReturnType<typeof setInterval>;
+	private stopColor?: (typeof RAINBOW_COLORS)[number];
+	private stopWaveDistance = 0;
 	private frame = 0;
 
 	constructor(
@@ -112,22 +129,33 @@ class PiBanner {
 		this.theme = theme;
 		this.extensions = extensions;
 		this.contextFiles = contextFiles;
-		if (animate) {
-			this.animationTimer = setInterval(() => {
-				this.frame++;
-				this.tui.requestRender();
-			}, 80);
-		}
+		if (animate) this.animationTimer = setInterval(() => this.advanceAnimation(), ANIMATION_INTERVAL_MS);
 	}
 
 	stopAnimation(): void {
-		if (this.animationTimer === undefined) return;
-		clearInterval(this.animationTimer);
-		this.animationTimer = undefined;
+		if (this.animationTimer === undefined || this.stopColor !== undefined) return;
+		this.stopColor = this.rainbowColor(BOTTOM_RIGHT_PIXEL_COLUMN, BOTTOM_ROW);
+		this.stopWaveDistance = 0;
+		this.tui.requestRender();
 	}
 
 	dispose(): void {
-		this.stopAnimation();
+		this.clearAnimationTimer();
+	}
+
+	private advanceAnimation(): void {
+		this.frame++;
+		if (this.stopColor !== undefined) {
+			this.stopWaveDistance++;
+			if (this.stopWaveDistance >= STOP_WAVE_DISTANCE) this.clearAnimationTimer();
+		}
+		this.tui.requestRender();
+	}
+
+	private clearAnimationTimer(): void {
+		if (this.animationTimer === undefined) return;
+		clearInterval(this.animationTimer);
+		this.animationTimer = undefined;
 	}
 
 	invalidate(): void {}
@@ -161,8 +189,14 @@ class PiBanner {
 
 	private colorize(pixel: string, column: number, row: number): string {
 		if (pixel === " ") return pixel;
-		const color = RAINBOW_COLORS[(column + row + this.frame) % RAINBOW_COLORS.length]!;
+		const color = this.stopColor !== undefined && waveDistance(column, row) <= this.stopWaveDistance
+			? this.stopColor
+			: this.rainbowColor(column, row);
 		return `\x1b[38;2;${color[0]};${color[1]};${color[2]}m${pixel}${RESET}`;
+	}
+
+	private rainbowColor(column: number, row: number): (typeof RAINBOW_COLORS)[number] {
+		return RAINBOW_COLORS[(column + row + this.frame) % RAINBOW_COLORS.length]!;
 	}
 }
 

@@ -10,6 +10,11 @@ function stripAnsi(text) {
 	return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
+function pixelColors(text) {
+	return [...text.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m([^\x1b])\x1b\[0m/gu)]
+		.map((match) => `${match[1]},${match[2]},${match[3]}`);
+}
+
 test("lists extension resources represented by commands and tools", () => {
 	const extensions = getLoadedExtensionNames(
 		[
@@ -97,10 +102,28 @@ test("replaces the startup header with a rainbow Pi banner", async (context) => 
 	assert.ok(intervalCallback);
 	intervalCallback();
 	assert.equal(renderRequests, 1);
+	const stopColor = pixelColors(header.render(18)[8]).at(-1);
+	assert.ok(stopColor);
+
 	messageStartHandler();
+	assert.equal(intervalCleared, false);
+	intervalCallback();
+	const waveLines = header.render(18);
+	assert.equal(pixelColors(waveLines[8]).at(-1), stopColor);
+	assert.notEqual(pixelColors(waveLines[1])[0], stopColor);
+
+	let stopFrames = 1;
+	while (!intervalCleared && stopFrames < 100) {
+		intervalCallback();
+		stopFrames++;
+	}
 	assert.equal(intervalCleared, true);
+	assert.ok(stopFrames > 1);
+
 	const lines = header.render(80);
 	const rendered = lines.map(stripAnsi);
+	const settledColors = new Set(lines.slice(1, 9).flatMap(pixelColors));
+	assert.deepEqual([...settledColors], [stopColor]);
 
 	assert.ok(lines.some((line) => line.includes("\x1b[38;2;")));
 	assert.deepEqual(header.render(18).map(stripAnsi).slice(1, 9), [
