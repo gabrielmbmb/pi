@@ -32,6 +32,7 @@ Pi clones the package once. To load only selected resources, run `pi config` and
 | --- | --- |
 | [`banner`](extensions/banner.ts) | Replaces Pi's startup header with an animated rainbow `Pi` banner, loaded-extension names, and loaded context files. |
 | [`usage-monitor`](extensions/usage-monitor/index.ts) | Shows provider usage / balance below the prompt line. Supports OpenRouter, OpenAI Codex, and OpenCode Go (5h / weekly / monthly quota windows). |
+| [`subagents`](extensions/subagents/index.ts) | Delegates self-contained tasks to in-process subagents with parallel spawning, context seeding, model routing, collection, cancellation, and nested delegation. Includes a live `/subagents` tree-and-preview inspector, scrollable activity/results, retained history, and confirmed subtree cancellation. See the [inspector guide](extensions/subagents/README.md). |
 | [`vi-mode`](extensions/vi-mode/index.ts) | Adds Insert, Normal, character-wise Visual, and line-wise Visual prompt editing with Vim motions, operators, text objects, counts, registers, undo/redo, and a Pi-aware Ex command bridge. See the [shortcut guide](extensions/vi-mode/README.md). |
 | [`worktree`](extensions/worktree.ts) | Creates or reuses `.agents/worktrees/<name>` from the current branch or a selected base via `--worktree <name> --worktree-base <branch>` or `/worktree <name> --base <branch>`, then starts or switches Pi to it. Resume a worktree session from another checkout with `--worktree <name> --worktree-session <session-id>`. |
 
@@ -39,6 +40,4 @@ The banner expects Pi's native startup listing to be disabled with `"quietStartu
 
 ## Prompts
 
-| Prompt | Description |
-| --- | --- |
-| [`subagent`](prompts/subagent.md) | Self-spawns an isolated `pi` subprocess to own a task end-to-end, asking for model/reasoning if omitted, e.g. `/subagent --model sonnet --reasoning high check the PR review and address the comments`. |
+No prompt templates are currently included.
