@@ -1,8 +1,9 @@
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
-import { Input, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from "@earendil-works/pi-tui";
+import { Input, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { plainText } from "../activity.ts";
 import { ROOT_AGENT_NAME } from "../constants.ts";
-import type { SubagentRegistry } from "../manager.ts";
+import type { SubagentNode, SubagentRegistry } from "../manager.ts";
+import type { ConversationOptions } from "./conversation.ts";
 import { formatDuration, statusColor, statusSymbol } from "../render.ts";
 import { InspectorContent, type AgentView } from "./content.ts";
 import { breadcrumb, cancelTargets, isActive, treeRows, type TreeFilter, type TreeRow } from "./model.ts";
@@ -29,7 +30,7 @@ export function createInspectorState(): InspectorState {
   return { collapsed: new Set(), view: "activity", views: new Map(), scroll: new Map(), filter: "all", query: "", expandedTools: false };
 }
 
-interface PanelOptions {
+interface PanelOptions extends ConversationOptions {
   state?: InspectorState;
   keybindings?: KeybindingsManager;
   height?: () => number;
@@ -80,7 +81,7 @@ export class SubagentPanel implements Component, Focusable {
     this.requestRender = requestRender;
     this.options = options;
     this.state = options.state ?? createInspectorState();
-    this.content = new InspectorContent(theme);
+    this.content = new InspectorContent(theme, options);
     if (options.inspect) {
       this.state.selectedName = options.inspect;
       this.state.filter = "all";
@@ -97,6 +98,17 @@ export class SubagentPanel implements Component, Focusable {
   private key(data: string, action: "up" | "down" | "pageUp" | "pageDown" | "confirm" | "cancel"): boolean {
     return this.options.keybindings?.matches(data, `tui.select.${action}`)
       ?? matchesKey(data, action === "confirm" ? Key.enter : action === "cancel" ? Key.escape : action);
+  }
+
+  private viewportKey(data: string, action: "pageUp" | "pageDown" | "top" | "bottom" | "halfPageUp" | "halfPageDown" | "lineUp" | "lineDown"): boolean {
+    if (this.options.keybindings) return this.options.keybindings.matches(data, `tui.altScreen.${action}`);
+    if (action === "top" || action === "bottom") return matchesKey(data, action === "top" ? Key.home : Key.end);
+    return (action === "pageUp" || action === "pageDown") && matchesKey(data, action);
+  }
+
+  private bottomHint(): string {
+    const keys = this.options.keybindings?.getKeys("tui.altScreen.bottom");
+    return keys ? keys.join("/") || "(unbound)" : "End";
   }
 
   private hint(action: "up" | "down" | "confirm" | "cancel"): string {
@@ -122,7 +134,7 @@ export class SubagentPanel implements Component, Focusable {
       return;
     }
     this.viewer = true;
-    this.state.view = view ?? this.state.views.get(node.name) ?? (isActive(node) ? "activity" : "result");
+    this.state.view = view ?? this.state.views.get(node.name) ?? "activity";
     this.state.views.set(node.name, this.state.view);
   }
 
@@ -131,7 +143,7 @@ export class SubagentPanel implements Component, Focusable {
     let state = this.state.scroll.get(key);
     if (!state) {
       const node = this.registry.nodes.get(this.state.selectedName ?? "");
-      state = { offset: 0, follow: this.viewer && this.state.view === "activity" && Boolean(node && isActive(node)), revision: node?.activity?.revision ?? 0 };
+      state = { offset: 0, follow: this.viewer && this.state.view === "activity", revision: node?.transcript?.revision ?? node?.activity?.revision ?? 0 };
       this.state.scroll.set(key, state);
     }
     return state;
@@ -147,6 +159,14 @@ export class SubagentPanel implements Component, Focusable {
   handleInput(data: string): void {
     this.handle(data);
     this.requestRender();
+  }
+
+  handleMouse(event: TuiMouseEvent) {
+    if (event.type !== "wheel" || !this.viewer || this.help || this.confirmation) return undefined;
+    const delta = event.wheelDelta ?? 0;
+    if (Number.isFinite(delta) && Math.trunc(delta)) this.scrollBy(Math.trunc(delta));
+    this.requestRender();
+    return { handled: true };
   }
 
   private handle(data: string): void {
@@ -235,12 +255,19 @@ export class SubagentPanel implements Component, Focusable {
     if (enter && !this.viewer) { this.openViewer(); return; }
     const up = this.key(data, "up") || data === "k";
     const down = this.key(data, "down") || data === "j";
-    const pageUp = this.key(data, "pageUp");
-    const pageDown = this.key(data, "pageDown");
+    const pageUp = this.viewer ? this.viewportKey(data, "pageUp") : this.key(data, "pageUp");
+    const pageDown = this.viewer ? this.viewportKey(data, "pageDown") : this.key(data, "pageDown");
     if (this.viewer || this.focus === "preview") {
-      if (up || down || pageUp || pageDown) this.scrollBy((up || pageUp ? -1 : 1) * (pageUp || pageDown ? this.pageHeight : 1));
-      if (matchesKey(data, Key.home)) this.scrollBy(-Infinity);
-      if (matchesKey(data, Key.end)) {
+      const half = Math.max(1, Math.floor(this.pageHeight / 2));
+      const amount = pageUp ? -this.pageHeight : pageDown ? this.pageHeight
+        : this.viewer && this.viewportKey(data, "halfPageUp") ? -half
+        : this.viewer && this.viewportKey(data, "halfPageDown") ? half
+        : this.viewer && this.viewportKey(data, "lineUp") ? -1
+        : this.viewer && this.viewportKey(data, "lineDown") ? 1
+        : up ? -1 : down ? 1 : 0;
+      if (amount) this.scrollBy(amount);
+      if (this.viewer ? this.viewportKey(data, "top") : matchesKey(data, Key.home)) this.scrollBy(-Infinity);
+      if (this.viewer ? this.viewportKey(data, "bottom") : matchesKey(data, Key.end)) {
         const scroll = this.scrollState();
         scroll.offset = Math.max(0, this.totalLines - this.pageHeight);
         scroll.anchor = undefined;
@@ -290,21 +317,42 @@ export class SubagentPanel implements Component, Focusable {
     const scroll = this.scrollState();
     this.pageHeight = Math.max(1, height - 1);
     this.totalLines = lines.length;
-    if (!scroll.follow && scroll.anchor) {
-      const anchor = lines.indexOf(scroll.anchor);
+    if (!scroll.follow && scroll.anchor && lines[scroll.offset] !== scroll.anchor) {
+      // Native cards repeat blank/padded lines. Prefer the nearest match, not
+      // the first identical line near the start of the conversation.
+      let anchor = -1;
+      for (let index = 0; index < lines.length; index++)
+        if (lines[index] === scroll.anchor && (anchor < 0 || Math.abs(index - scroll.offset) < Math.abs(anchor - scroll.offset))) anchor = index;
       if (anchor >= 0) scroll.offset = anchor;
     }
     const max = Math.max(0, lines.length - this.pageHeight);
     scroll.offset = scroll.follow ? max : Math.min(scroll.offset, max);
     scroll.anchor = lines[scroll.offset];
-    const revision = this.registry.nodes.get(this.state.selectedName ?? "")?.activity?.revision ?? 0;
+    const selected = this.registry.nodes.get(this.state.selectedName ?? "");
+    const revision = selected?.transcript?.revision ?? selected?.activity?.revision ?? 0;
     if (scroll.follow) scroll.revision = revision;
     const activity = this.viewer && this.state.view === "activity";
     const live = this.registry.nodes.get(this.state.selectedName ?? "");
-    const status = activity ? scroll.follow ? `${live && isActive(live) ? "LIVE" : "At end"} · following latest` : `Paused${revision > scroll.revision ? ` · ↓ ${revision - scroll.revision} updates` : ""} · End follow` : `${Math.min(lines.length, scroll.offset + 1)}–${Math.min(lines.length, scroll.offset + this.pageHeight)} / ${lines.length}`;
+    const status = activity ? scroll.follow ? `${live && isActive(live) ? "LIVE" : "At end"} · following latest` : `Paused${revision > scroll.revision ? ` · ↓ ${revision - scroll.revision} updates` : ""} · ${this.bottomHint()} follow` : `${Math.min(lines.length, scroll.offset + 1)}–${Math.min(lines.length, scroll.offset + this.pageHeight)} / ${lines.length}`;
     const body = lines.slice(scroll.offset, scroll.offset + this.pageHeight);
     while (body.length < this.pageHeight) body.push("");
     return [...body, this.theme.fg("dim", truncateToWidth(status, width))];
+  }
+
+  private conversation(width: number, height: number, node: SubagentNode, now: number): string[] {
+    const view = this.state.view === "activity" ? "Conversation" : this.state.view === "result" ? "Result" : "Details";
+    const header = this.theme.fg("muted", plainText(`${breadcrumb(this.registry, node.name)} · ${view} · ${node.model ?? "unknown model"} · ${node.status}`));
+    const lines = this.content.render(this.registry, node, this.state.view, width, this.state.expandedTools, now);
+    const body = this.viewport(lines, height - 2, width).slice(0, height - 2);
+    const toolsKey = this.options.keybindings?.getKeys("app.tools.expand").join("/") || "Ctrl+O";
+    const footer = this.theme.fg("dim", this.message || (width >= 110
+      ? `Read-only · ${this.hint("cancel")} agents · ${toolsKey} tools · 1 Conversation · 2 Result · 3 Details · ${this.bottomHint()} latest · ?`
+      : width >= 70
+        ? `Read-only · ${this.hint("cancel")} back · ${toolsKey} tools · 1/2/3 views · ${this.bottomHint()} latest · ?`
+        : `Read-only · ${this.hint("cancel")} back · ? help`));
+    // Native components own padding, spacing, backgrounds, and tool framing.
+    // No enclosing box or extra margins around the conversation itself.
+    return [header, ...body, footer].map((line) => truncateToWidth(line, Math.max(1, width)));
   }
 
   render(width: number): string[] {
@@ -313,13 +361,14 @@ export class SubagentPanel implements Component, Focusable {
     const now = this.options.now?.() ?? Date.now();
     this.rows();
     const node = this.registry.nodes.get(this.state.selectedName ?? "");
+    if (this.viewer && node && !this.confirmation && !this.help) return this.conversation(width, height, node, now);
     const counts = new Map<string, number>();
     for (const item of this.registry.nodes.values()) counts.set(item.status, (counts.get(item.status) ?? 0) + 1);
     const summary = ["running", "merging", "queued", "error", "partial", "done", "cancelled"]
       .filter((status) => counts.has(status))
       .map((status) => `${counts.get(status)} ${status === "merging" ? "waiting" : status === "error" ? "failed" : status}`).join(" · ") || "idle";
     const title = this.theme.fg("accent", this.theme.bold(`Subagents · ${summary}`));
-    const tabs = `1 Activity${this.state.view === "activity" ? " ●" : ""}  2 Result${this.state.view === "result" ? " ●" : ""}  3 Details${this.state.view === "details" ? " ●" : ""}`;
+    const tabs = `1 Conversation${this.state.view === "activity" ? " ●" : ""}  2 Result${this.state.view === "result" ? " ●" : ""}  3 Details${this.state.view === "details" ? " ●" : ""}`;
     const controls = this.viewer ? `${tabs} · ${breadcrumb(this.registry, node?.name ?? ROOT_AGENT_NAME)}` : `View: ${this.state.filter === "failed" ? "failed + partial" : this.state.filter} (v) · ${this.focus === "tree" ? "TREE" : "PREVIEW"} focused · / search${this.state.query ? `: ${this.state.query}` : ""}`;
     let header = [title, this.theme.fg("muted", plainText(controls).replace(/\s+/g, " "))];
     if (this.searching) header.push(...this.input.render(inner));
@@ -345,7 +394,7 @@ export class SubagentPanel implements Component, Focusable {
         `${this.hint("up")}/${this.hint("down")} or j/k: select in tree; scroll in transcript/preview`,
         "←/→ or h/l: collapse/parent; expand/first child",
         `${this.hint("confirm")}: open transcript · Tab: focus tree/preview`,
-        "1 Activity · 2 Result · 3 Details (full task and configuration)",
+        "1 Conversation · 2 Result · 3 Details (task, configuration, lifecycle)",
         "PgUp/PgDn: page · Home: beginning · End: latest/follow",
         "Scrolling up pauses following, never execution.",
         `${this.options.keybindings?.getKeys("app.tools.expand").join("/") || "Ctrl+O"}: expand/collapse tool output`,
@@ -353,7 +402,8 @@ export class SubagentPanel implements Component, Focusable {
         "c: confirm stopping selected subtree; main selects every agent",
         "Esc: dismiss search/confirmation, return to tree, then close",
         "Completed agents remain visible after collection, merge, or expiry.",
-        "Activity is bounded and excludes inherited history/private reasoning.",
+        "Conversation uses Pi's native chat components. No worker tools are replayed.",
+        "History is bounded; inherited history, private reasoning, and image data are omitted.",
         "? closes this help · PgUp/PgDn scroll",
       ];
       const lines = text.flatMap((line) => wrapTextWithAnsi(plainText(line), inner));
@@ -361,8 +411,6 @@ export class SubagentPanel implements Component, Focusable {
       this.infoOffset = Math.min(this.infoOffset, Math.max(0, lines.length - bodyHeight));
       body = lines.slice(this.infoOffset, this.infoOffset + bodyHeight);
       footer = confirmation ? `${confirmation.stop ? " Keep running " : "[Keep running]"}  ${confirmation.stop ? `[Stop ${confirmation.targets.length}]` : ` Stop ${confirmation.targets.length} `} · Tab · ${this.hint("confirm")} · ${this.hint("cancel")}` : "PgUp/PgDn scroll · Esc back";
-    } else if (this.viewer && node) {
-      body = this.viewport(this.content.render(this.registry, node, this.state.view, inner, this.state.expandedTools, now), bodyHeight, inner);
     } else if (inner >= 104) {
       const leftWidth = Math.floor((inner - 3) * 0.44);
       const rightWidth = inner - leftWidth - 3;

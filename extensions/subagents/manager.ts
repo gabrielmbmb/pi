@@ -28,6 +28,7 @@ import {
 } from "./constants.ts";
 
 import { ActivityLog, type ActivityEntry } from "./activity.ts";
+import type { TranscriptLog } from "./transcript.ts";
 
 export type SubagentStatus =
   | "queued"
@@ -89,8 +90,11 @@ export interface SubagentSpawnOptions {
   thinking?: string;
   modelReason?: string;
   onParentError: OnParentErrorMode;
-  maxTurns?: number;
   timeoutS?: number;
+  /** Preflight notices, including provider rerouting and audit-text truncation. */
+  warnings?: string[];
+  /** Original working directory, used only to render recorded tool paths. */
+  cwd?: string;
   /** Full delegated task, bounded by spawn validation. Not inherited history. */
   prompt?: string;
   /** First 80 chars of the prompt, for transcript/popup display. */
@@ -102,6 +106,7 @@ export interface SubagentNode extends SubagentSpawnOptions {
   status: SubagentStatus;
   createdAt?: number;
   activity?: ActivityLog;
+  transcript?: TranscriptLog;
   lastActivityAt?: number;
   phase?: string;
   /** Own model usage only; node.usage can include already-collected children. */
@@ -451,6 +456,8 @@ export class SubagentRegistry {
       turns: 0,
       spawnIndex: this.nextSpawnIndex++,
     };
+    // Older tool closures surviving /reload may still pass this removed option.
+    Reflect.deleteProperty(node, "maxTurns");
     this.nodes.set(node.name, node);
 
     this.recordState(node, "Queued");
@@ -524,6 +531,7 @@ export class SubagentRegistry {
 
     node.endedAt = this.now();
     node.status = outcome.status;
+    node.transcript?.finish(outcome.status, outcome.error);
     node.ownUsage = { ...EMPTY_USAGE, ...(outcome.usage ?? node.ownUsage) };
     node.usage = withDelegatedUsage(node, node.ownUsage);
     node.ownOutput = (outcome.output ?? outcome.partialOutput ?? "").slice(0, OUTPUT_CAP);
@@ -709,6 +717,7 @@ export class SubagentRegistry {
       clearTimeout(node.timeoutTimer);
       node.usage = node.status === "merging" ? node.usage : withDelegatedUsage(node, node.ownUsage ?? node.usage);
       node.status = "cancelled";
+      node.transcript?.finish("cancelled", options.stopReason);
       node.endedAt = this.now();
       node.ownOutput ??= node.liveOutput ?? "";
       node.result = {
@@ -874,6 +883,9 @@ export function getSharedRegistry(hooks: RegistryHooks = {}): SubagentRegistry {
     Object.setPrototypeOf(existing, SubagentRegistry.prototype);
     const registry = existing as SubagentRegistry;
     Object.setPrototypeOf(registry.store, ResultStore.prototype);
+    // Old watchers read the node field on each turn. Removing it also disables
+    // their future turn-limit aborts without interrupting running workers.
+    for (const node of registry.nodes.values()) Reflect.deleteProperty(node, "maxTurns");
     return registry;
   }
   const registry = new SubagentRegistry(hooks);

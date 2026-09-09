@@ -5,17 +5,21 @@ import { ROOT_AGENT_NAME } from "../constants.ts";
 import type { SubagentNode, SubagentRegistry } from "../manager.ts";
 import { formatDuration, formatTokens } from "../render.ts";
 import { currentActivity, deliveryLabel, isActive } from "./model.ts";
+import { ConversationContent, type ConversationOptions } from "./conversation.ts";
 
 export type AgentView = "activity" | "result" | "details";
 
 export class InspectorContent {
   private cacheKey = "";
   private cached: string[] = [];
+  private cachedNode?: SubagentNode;
+  private readonly conversation: ConversationContent;
   private readonly markdownTheme: MarkdownTheme;
   private readonly theme: Theme;
 
-  constructor(theme: Theme) {
+  constructor(theme: Theme, options: ConversationOptions = {}) {
     this.theme = theme;
+    this.conversation = new ConversationContent(theme, options);
     const fg = (color: Parameters<Theme["fg"]>[0]) => (text: string) => theme.fg(color, text);
     this.markdownTheme = {
       heading: fg("mdHeading"), link: fg("mdLink"), linkUrl: fg("mdLinkUrl"),
@@ -29,6 +33,7 @@ export class InspectorContent {
 
   invalidate(): void {
     this.cacheKey = "";
+    this.conversation.invalidate();
   }
 
   private md(text: string, width: number): string[] {
@@ -57,7 +62,7 @@ export class InspectorContent {
       "", ...this.line(`Model: ${node.model ?? "unknown"} · thinking ${node.thinking ?? "unknown"}`, width),
       ...this.line(`${node.turns} turns · ${usage ? `${formatTokens(usage.inputTokens + usage.outputTokens)} tokens · $${usage.cost.toFixed(4)} reported (own)` : "own usage unavailable"}`, width),
       "", ...this.line(this.delivery(registry, node), width),
-      this.theme.fg("dim", "Enter transcript · 1 Activity / 2 Result / 3 Details"),
+      this.theme.fg("dim", "Enter conversation · 1 Conversation / 2 Result / 3 Details"),
     ];
   }
 
@@ -70,8 +75,8 @@ export class InspectorContent {
   }
 
   render(registry: SubagentRegistry, node: SubagentNode, view: AgentView, width: number, expanded: boolean, now: number): string[] {
-    const key = `${node.name}:${node.activity?.revision}:${node.status}:${node.delivery?.at}:${view}:${width}:${expanded}:${Math.floor(now / 1000)}`;
-    if (this.cacheKey === key) return this.cached;
+    const key = `${node.name}:${node.transcript?.revision}:${node.activity?.revision}:${node.status}:${node.delivery?.at}:${view}:${width}:${expanded}:${Math.floor(now / 1000)}`;
+    if (this.cachedNode === node && this.cacheKey === key) return this.cached;
     const heading = (text: string) => this.theme.fg("accent", this.theme.bold(text));
     let lines: string[];
     if (view === "details") {
@@ -83,9 +88,10 @@ export class InspectorContent {
           `Model: ${node.model ?? "unknown"}`,
           `Thinking: ${node.thinking ?? "unknown"}`,
           `Routing reason: ${node.modelReason ?? "not specified"}`,
-          `Context: ${node.contextMode}${node.contextTurns ? ` (${node.contextTurns} turns)` : ""}; inherited history omitted from Activity`,
+          ...(node.warnings ?? []).map((warning) => `Spawn warning: ${warning}`),
+          `Context: ${node.contextMode}${node.contextTurns ? ` (${node.contextTurns} turns)` : ""}; inherited history omitted from Conversation`,
           `Depth: ${node.depth} · parent failure: ${node.onParentError}`,
-          `Turn limit: ${node.maxTurns ?? "none"} · timeout: ${node.timeoutS ? `${node.timeoutS}s` : "none"}`,
+          `Timeout: ${node.timeoutS ? `${node.timeoutS}s` : "none"}`,
           `Started: ${node.startedAt !== undefined ? new Date(node.startedAt).toISOString() : "not started"}`,
           `Ended: ${node.endedAt !== undefined ? new Date(node.endedAt).toISOString() : "not finished"}`,
           `Turns: ${node.turns}`,
@@ -95,7 +101,9 @@ export class InspectorContent {
           this.delivery(registry, node),
           ...(node.result?.stopReason ? [`Stop reason: ${node.result.stopReason}`] : []),
           ...(node.result?.error ? [`Error: ${node.result.error}`] : []),
-        ].flatMap((line) => this.line(line, width))];
+        ].flatMap((line) => this.line(line, width)), "", heading("Lifecycle & delivery history"),
+        ...(node.activity?.entries ?? []).filter((entry) => entry.kind === "state")
+          .flatMap((entry) => this.line(`${new Date(entry.at).toISOString()} · ${entry.title}`, width))];
     } else if (view === "result") {
       const result = node.result;
       const output = result?.output || result?.partialOutput || node.liveOutput || "";
@@ -106,28 +114,8 @@ export class InspectorContent {
         ...(result?.mergedChildren ? this.line(`Includes ${result.mergedChildren} child result sections below the agent's own answer.`, width) : []),
         ...this.md(output || "No text output captured.", width),
         ...(result?.outputTruncated || node.outputTruncated ? ["", ...this.line("Output was capped; this is the retained result, not an unlimited transcript.", width)] : [])];
-    } else {
-      lines = [heading("Activity · own messages and tools"), this.theme.fg("dim", "Inherited history and private reasoning are omitted."), ""];
-      if (node.activity?.dropped) lines.push(...this.line(`${node.activity.dropped} earlier events discarded (bounded history).`, width), "");
-      for (const entry of node.activity?.entries ?? []) {
-        const time = new Date(entry.at).toLocaleTimeString("en-GB", { hour12: false });
-        const symbol = entry.state === "running" ? "●" : entry.state === "error" ? "✗" : entry.state === "cancelled" ? "■" : "✓";
-        const duration = entry.kind === "tool" ? ` · ${formatDuration(Math.max(0, ((entry.endedAt ?? now) - entry.at) / 1000))}` : "";
-        lines.push(...this.line(`${time} ${entry.kind === "tool" ? `${symbol} ` : ""}${entry.title}${duration}`, width)
-          .map((line) => this.theme.fg(entry.state === "error" ? "error" : "accent", line)));
-        if (entry.text) {
-          if (entry.kind === "assistant") lines.push(...this.md(entry.text, width));
-          else if (expanded) lines.push(...this.line(entry.text, width));
-          else {
-            const tail = entry.text.trim().split("\n").slice(-2).join("\n");
-            lines.push(...this.line(tail, width).slice(-3), this.theme.fg("dim", "… tool output collapsed"));
-          }
-        }
-        if (entry.truncated) lines.push(this.theme.fg("warning", "Earlier text discarded; showing retained tail."));
-        lines.push("");
-      }
-      if (!node.activity?.entries.length) lines.push("No activity captured for this agent yet.");
-    }
+    } else lines = this.conversation.render(node, width, expanded);
+    this.cachedNode = node;
     this.cacheKey = key;
     this.cached = lines;
     return lines;

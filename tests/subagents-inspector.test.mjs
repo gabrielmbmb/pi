@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { TranscriptLog } from "../extensions/subagents/transcript.ts";
 import { SubagentRegistry, ResultStore, getSharedRegistry } from "../extensions/subagents/manager.ts";
 import { ROOT_AGENT_NAME } from "../extensions/subagents/constants.ts";
 import { ActivityLog, ACTIVITY_MAX_CHARS, ACTIVITY_MAX_EVENTS, plainText } from "../extensions/subagents/activity.ts";
@@ -9,6 +11,8 @@ import { treeRows, currentActivity } from "../extensions/subagents/inspector/mod
 import { InspectorContent } from "../extensions/subagents/inspector/content.ts";
 import { watchSession, getSharedEngine } from "../extensions/subagents/session.ts";
 import subagentsExtension from "../extensions/subagents/index.ts";
+
+initTheme("dark", false);
 
 const theme = {
   fg: (_color, text) => text, bg: (_color, text) => text,
@@ -59,6 +63,7 @@ test("inspector: collection and eviction never remove nodes or ancestor paths", 
   assert.equal(rows[2].prefix, "   └─ ");
   const ui = panel(registry, { inspect: "parent" });
   assert.match(ui.render(), /retained answer/);
+  ui.component.handleInput("2");
   assert.match(ui.render(), /Collected by main/);
 });
 
@@ -103,7 +108,9 @@ test("inspector: preview is automatic and Enter/Escape have distinct depths", ()
   const ui = panel(registry);
   assert.match(ui.render(), /Investigate token refresh/);
   ui.component.handleInput(keys.enter);
-  assert.match(ui.render(), /Activity · own messages and tools/);
+  assert.match(ui.render(), /Conversation/);
+  assert.match(ui.render(), /Read-only/);
+  assert.doesNotMatch(ui.render(), /╭|╰|Activity · own messages/);
   ui.component.handleInput("3");
   assert.match(ui.render(), /Delegated task/);
   ui.component.handleInput(keys.esc);
@@ -119,6 +126,8 @@ test("inspector: full retained result scrolls beyond the old five-line limit", (
   running(registry, "worker");
   registry.settle("worker", { status: "done", output: Array.from({ length: 100 }, (_, n) => `paragraph ${n}\n`).join("\n") });
   const ui = panel(registry, { inspect: "worker" });
+  assert.match(ui.render(), /Conversation/);
+  ui.component.handleInput("2");
   assert.match(ui.render(), /Result · done/);
   assert.doesNotMatch(ui.render(), /paragraph 99/);
   ui.component.handleInput(keys.end);
@@ -130,14 +139,16 @@ test("inspector: full retained result scrolls beyond the old five-line limit", (
 
 test("inspector: following pauses on scroll and new output does not move the reader", () => {
   const registry = new SubagentRegistry();
-  running(registry, "worker");
-  for (let i = 0; i < 40; i++) registry.recordActivity("worker", { id: `${i}`, kind: "state", title: `event-${i}`, text: "", at: i });
+  const node = running(registry, "worker");
+  node.transcript = new TranscriptLog();
+  node.transcript.user("task", node.prompt);
+  for (let i = 0; i < 40; i++) node.transcript.assistant(`${i}`, assistant(`event-${i}`), false);
   const ui = panel(registry, { inspect: "worker" });
   assert.match(ui.render(), /event-39/);
   assert.match(ui.render(), /LIVE · following/);
   ui.component.handleInput(keys.home);
   assert.match(ui.render(), /event-0/);
-  registry.recordActivity("worker", { id: "new", kind: "state", title: "newest-event", text: "", at: 100 });
+  node.transcript.assistant("new", assistant("newest-event"), true);
   assert.match(ui.render(), /event-0/);
   assert.doesNotMatch(ui.render(), /newest-event/);
   assert.match(ui.render(), /1 updates/);
@@ -335,12 +346,28 @@ test("manager: result inspection does not refresh collection LRU or extend TTL",
 test("inspector: tool output expansion and errors have readable content", () => {
   const registry = new SubagentRegistry();
   const node = running(registry, "worker");
-  registry.recordActivity("worker", { id: "tool", kind: "tool", title: "bash: tests", text: "first line\nsecond line\nthird line\nlast line", at: 0, endedAt: 1000, state: "error" });
+  node.transcript = new TranscriptLog();
+  node.transcript.tool({ type: "toolCall", id: "tool", name: "bash", arguments: { command: "tests" } }, true);
+  node.transcript.result("tool", "bash", { content: [{ type: "text", text: "first line\nsecond line\nthird line\nfourth line\nfifth line\nsixth line\nlast line" }] }, true, false);
   const content = new InspectorContent(theme);
   const collapsed = content.render(registry, node, "activity", 80, false, 2000).join("\n");
   assert.match(collapsed, /last line/);
   assert.doesNotMatch(collapsed, /first line/);
   assert.match(content.render(registry, node, "activity", 80, true, 2000).join("\n"), /first line/);
+});
+
+test("inspector: Details discloses provider rerouting and metadata truncation", () => {
+  const registry = new SubagentRegistry();
+  const node = running(registry, "worker", ROOT_AGENT_NAME, {
+    model: "openai-codex/gpt-5.4",
+    warnings: [
+      "No configured auth for openai/gpt-5.4; using openai-codex/gpt-5.4 (same model ID).",
+      "model_reason was truncated to 1024 characters for storage; the task prompt is unchanged.",
+    ],
+  });
+  const details = new InspectorContent(theme).render(registry, node, "details", 160, false, Date.now()).join("\n");
+  assert.match(details, /Spawn warning: No configured auth for openai\/gpt-5\.4; using openai-codex\/gpt-5\.4/);
+  assert.match(details, /Spawn warning: model_reason was truncated/);
 });
 
 test("command: direct inspection, completions, redraw cleanup, and session teardown", async () => {
@@ -379,7 +406,7 @@ test("command: direct inspection, completions, redraw cleanup, and session teard
     assert.match(notices.at(-1), /No subagent/);
     const pending = command.handler("inspect worker", ctx);
     await opened;
-    assert.match(component.render(120).join("\n"), /Activity · own messages/);
+    assert.match(component.render(120).join("\n"), /Conversation/);
     for (let i = 0; i < 50; i++) registry.touch("worker");
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(renders, 1);
@@ -418,24 +445,30 @@ test("reload: registry behavior upgrades without replacing live nodes or old que
   try {
     const registry = new SubagentRegistry();
     const node = running(registry, "old-worker");
-    spawn(registry, "old-queued");
+    const queued = spawn(registry, "old-queued");
+    node.maxTurns = 1;
+    queued.maxTurns = 2;
     const legacyPrototype = Object.create(SubagentRegistry.prototype);
     legacyPrototype.recordActivity = undefined;
     Object.setPrototypeOf(registry, legacyPrototype);
     let legacyPumps = 0;
-    const legacy = { registry, start() {}, pump() { legacyPumps++; } };
+    const legacy = { registry, inspectorVersion: 1, start() {}, pump() { legacyPumps++; } };
     globalThis.__pi_subagents_registry__ = registry;
     globalThis.__pi_subagents_engine__ = legacy;
     assert.equal(getSharedRegistry(), registry);
+    assert.equal(Object.hasOwn(node, "maxTurns"), false);
+    assert.equal(Object.hasOwn(queued, "maxTurns"), false);
     registry.recordActivity(node.name, { id: "new", kind: "state", title: "new behavior", text: "", at: 0 });
     assert.equal(registry.nodes.get(node.name), node);
     const engine = getSharedEngine();
     assert.notEqual(engine, legacy);
+    assert.equal(engine.inspectorVersion, 4);
     assert.equal(getSharedEngine(), engine);
     engine.pump();
     assert.equal(legacyPumps, 1);
     assert.equal(registry.nodes.get("old-queued").status, "queued");
-    spawn(registry, "new-queued");
+    const newQueued = spawn(registry, "new-queued", ROOT_AGENT_NAME, { maxTurns: 1 });
+    assert.equal(Object.hasOwn(newQueued, "maxTurns"), false);
     assert.equal(registry.dequeueNext(new Set(["new-queued"])).name, "new-queued");
     assert.equal(registry.nodes.get("old-queued").status, "queued");
   } finally {

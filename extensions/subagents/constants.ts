@@ -37,10 +37,10 @@ export const GUIDANCE_SNIPPET_CHARS = 60;
 /** Spawn validation bounds (DESIGN.md §13). */
 export const MAX_NAME_LEN = 40;
 export const MAX_PROMPT_BYTES = 20 * 1024;
-export const MAX_TURNS = 50;
 export const MAX_CONTEXT_TURNS = 30;
 export const SPAWN_TIMEOUT_MAX_S = 3600;
-export const MAX_MODEL_REASON_CHARS = 80;
+/** Audit metadata storage cap, not a spawn rejection limit. */
+export const MAX_MODEL_REASON_CHARS = 1024;
 
 /** How many model candidates to list in resolution errors. */
 export const MAX_MODEL_CANDIDATES = 5;

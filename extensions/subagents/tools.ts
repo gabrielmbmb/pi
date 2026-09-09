@@ -30,7 +30,6 @@ import {
   MAX_DEPTH,
   MAX_NAME_LEN,
   MAX_PROMPT_BYTES,
-  MAX_TURNS,
   MAX_MODEL_REASON_CHARS,
   NAME_REGEX,
   ON_PARENT_ERROR_MODES,
@@ -114,7 +113,6 @@ export interface SpawnItemInput {
   model?: unknown;
   thinking?: unknown;
   onParentError?: unknown;
-  max_turns?: unknown;
   timeout_s?: unknown;
   model_reason?: unknown;
 }
@@ -127,9 +125,9 @@ export interface ValidatedSpawnItem {
   model?: string;
   thinking?: ThinkingLevelName;
   onParentError: OnParentErrorMode;
-  maxTurns?: number;
   timeoutS?: number;
   modelReason?: string;
+  modelReasonTruncated?: boolean;
 }
 
 /**
@@ -193,15 +191,6 @@ export function validateSpawnItem(item: SpawnItemInput): ValidatedSpawnItem | { 
     return { error: where("onParentError", "must be adopt or kill") };
   }
   if (
-    item.max_turns !== undefined &&
-    (typeof item.max_turns !== "number" ||
-      !Number.isInteger(item.max_turns) ||
-      item.max_turns < 1 ||
-      item.max_turns > MAX_TURNS)
-  ) {
-    return { error: where("max_turns", `must be an integer between 1 and ${MAX_TURNS}`) };
-  }
-  if (
     item.timeout_s !== undefined &&
     (typeof item.timeout_s !== "number" ||
       !Number.isInteger(item.timeout_s) ||
@@ -213,9 +202,12 @@ export function validateSpawnItem(item: SpawnItemInput): ValidatedSpawnItem | { 
   if (item.model_reason !== undefined && typeof item.model_reason !== "string") {
     return { error: where("model_reason", "must be a string") };
   }
-  if (typeof item.model_reason === "string" && item.model_reason.length > MAX_MODEL_REASON_CHARS) {
-    return { error: where("model_reason", `longer than ${MAX_MODEL_REASON_CHARS} chars`) };
-  }
+  // Audit text must never prevent otherwise valid work from starting.
+  const reason = typeof item.model_reason === "string" ? item.model_reason.replace(/\s+/g, " ").trim() : "";
+  const modelReasonTruncated = reason.length > MAX_MODEL_REASON_CHARS;
+  const modelReason = modelReasonTruncated
+    ? `${reason.slice(0, MAX_MODEL_REASON_CHARS - 1).replace(/[\uD800-\uDBFF]$/, "")}…`
+    : reason;
 
   return {
     name: item.name,
@@ -225,11 +217,9 @@ export function validateSpawnItem(item: SpawnItemInput): ValidatedSpawnItem | { 
     ...(typeof item.model === "string" ? { model: item.model } : {}),
     ...(item.thinking !== undefined ? { thinking: item.thinking as ThinkingLevelName } : {}),
     onParentError: (item.onParentError as OnParentErrorMode | undefined) ?? "adopt",
-    ...(typeof item.max_turns === "number" ? { maxTurns: item.max_turns } : {}),
     ...(typeof item.timeout_s === "number" ? { timeoutS: item.timeout_s } : {}),
-    ...(typeof item.model_reason === "string" && item.model_reason.length > 0
-      ? { modelReason: item.model_reason }
-      : {}),
+    ...(modelReason ? { modelReason } : {}),
+    ...(modelReasonTruncated ? { modelReasonTruncated: true } : {}),
   };
 }
 
@@ -307,7 +297,8 @@ export function makeSubagentTools(
       "Each subagent runs with its own context and the read/bash/edit/write tools; results are " +
       "retrieved with collect_subagents. Provide a complete, self-contained prompt per subagent — " +
       "context seeding (none | last_n_turns | all) supplies background conversation, not the task. " +
-      "Pick model/thinking per the injected subagent routing guidance and record why in model_reason.",
+      "Pick model/thinking per the injected subagent routing guidance, or omit model for the configured default or current provider/model. " +
+      "model_reason is optional audit metadata; long reasons are truncated, never rejected.",
     parameters: Type.Object({
       subagents: Type.Array(
         Type.Object({
@@ -320,14 +311,13 @@ export function makeSubagentTools(
             Type.Integer({ minimum: 1, maximum: MAX_CONTEXT_TURNS }),
           ),
           model: Type.Optional(
-            Type.String({ description: "Model override: 'provider/modelId' or bare id (per routing guidance)." }),
+            Type.String({ description: "Omit to use the configured default or inherit the current provider/model. For overrides, prefer a fully qualified provider/modelId from available routing guidance; bare IDs require unambiguous authenticated matches. Do not guess provider prefixes." }),
           ),
           thinking: Type.Optional(StringEnum(THINKING_LEVELS)),
           onParentError: Type.Optional(StringEnum(ON_PARENT_ERROR_MODES)),
-          max_turns: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TURNS })),
           timeout_s: Type.Optional(Type.Integer({ minimum: 1, maximum: SPAWN_TIMEOUT_MAX_S })),
           model_reason: Type.Optional(
-            Type.String({ description: "Why this model/thinking was chosen (audit), e.g. 'rule: reading files'." }),
+            Type.String({ description: `Optional audit reason, e.g. 'rule: reading files'. Whitespace is normalized; text beyond ${MAX_MODEL_REASON_CHARS} characters is truncated with a warning, not rejected.` }),
           ),
         }),
         { minItems: 1 },
@@ -397,6 +387,9 @@ export function makeSubagentTools(
           continue;
         }
 
+        const warnings = [...routing.warnings];
+        if (item.modelReasonTruncated) warnings.push(`model_reason was truncated to ${MAX_MODEL_REASON_CHARS} characters for storage; the task prompt is unchanged.`);
+
         let node: SubagentNode;
         try {
           node = registry.register({
@@ -408,8 +401,9 @@ export function makeSubagentTools(
             thinking: routing.thinking,
             ...(item.modelReason !== undefined ? { modelReason: item.modelReason } : {}),
             onParentError: item.onParentError,
-            ...(item.maxTurns !== undefined ? { maxTurns: item.maxTurns } : {}),
             ...(item.timeoutS !== undefined ? { timeoutS: item.timeoutS } : {}),
+            ...(warnings.length ? { warnings } : {}),
+            cwd: caller.cwd,
             prompt: item.prompt,
             promptSnippet: snippetOf(item.prompt.replace(/\s+/g, " ").trim(), 80),
           });
@@ -452,7 +446,7 @@ export function makeSubagentTools(
           ...(queued ? { queuePosition: registry.queuePosition(node.name) } : {}),
           model: node.model,
           thinking: node.thinking,
-          ...(routing.warnings.length > 0 ? { warnings: routing.warnings } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
         });
       }
 

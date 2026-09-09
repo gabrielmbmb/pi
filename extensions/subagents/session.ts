@@ -15,7 +15,7 @@
  *   (spawn unbound at MAX_DEPTH), with tool names included in the allowlist
  *   (an allowlist without them silently disables custom tools — spike finding)
  *
- * `watchSession()` wires the abort cascade: usage/turn tracking, max_turns,
+ * `watchSession()` wires the abort cascade: usage/turn tracking,
  * per-node timeout, settle into the registry, adoption on unexpected failure,
  * and merge-at-settle for normal terminations with live children.
  */
@@ -33,6 +33,7 @@ import { MAX_DEPTH, OUTPUT_CAP } from "./constants.ts";
 import { ACTIVITY_ENTRY_CHARS, contentText, toolTitle, type ActivityEntry } from "./activity.ts";
 import { getSharedRegistry, TERMINAL_STATUSES, type SubagentNode, type SubagentRegistry } from "./manager.ts";
 import { makeSubagentTools, type SpawnRequest, type SubagentEngine, type ToolCaller } from "./tools.ts";
+import { TranscriptLog } from "./transcript.ts";
 
 // ── engine ─────────────────────────────────────────────────────────────────
 
@@ -99,6 +100,9 @@ export function createEngine(registry: SubagentRegistry, legacyPump?: () => void
 }
 
 const ENGINE_GLOBAL_KEY = "__pi_subagents_engine__";
+// Bump when child tool/factory closures change so new spawns after /reload
+// use current validation/routing while previous engines drain their queues.
+const ENGINE_VERSION = 4;
 
 /**
  * Shared engine across /reload: running/queued subagents keep their pending
@@ -114,14 +118,14 @@ export function getSharedEngine(): SubagentEngine {
     "registry" in existing
   ) {
     const previous = existing as SubagentEngine & { inspectorVersion?: number };
-    if (previous.inspectorVersion === 1) return previous;
+    if (previous.inspectorVersion === ENGINE_VERSION) return previous;
     // Old engines own opaque pending specs. Let them drain those while new
     // spawns use the instrumented watcher; neither scheduler steals specs.
-    const engine = Object.assign(createEngine(getSharedRegistry(), () => previous.pump(), () => previous.reset?.()), { inspectorVersion: 1 });
+    const engine = Object.assign(createEngine(getSharedRegistry(), () => previous.pump(), () => previous.reset?.()), { inspectorVersion: ENGINE_VERSION });
     holder[ENGINE_GLOBAL_KEY] = engine;
     return engine;
   }
-  const engine = Object.assign(createEngine(getSharedRegistry()), { inspectorVersion: 1 });
+  const engine = Object.assign(createEngine(getSharedRegistry()), { inspectorVersion: ENGINE_VERSION });
   holder[ENGINE_GLOBAL_KEY] = engine;
   return engine;
 }
@@ -218,7 +222,6 @@ export function watchSession(
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 };
   let turns = 0;
   let lastToolActivity: number | undefined;
-  let maxTurnsHit = false;
   let timeoutHit = false;
   let settled = false;
   let disposed = false;
@@ -229,6 +232,11 @@ export function watchSession(
   let messageIndex = 0;
   let currentMessage: ActivityEntry | undefined;
   const activeTools = new Map<string, ActivityEntry>();
+  const transcript = node.transcript ??= new TranscriptLog();
+  let transcriptIndex = 0;
+  let transcriptMessageId: string | undefined;
+  let awaitingTask = Boolean(node.prompt);
+  if (node.prompt && !transcript.entries.length) transcript.user("task", node.prompt);
 
   function record(entry: ActivityEntry): void {
     registry.recordActivity?.(node.name, entry);
@@ -269,7 +277,24 @@ export function watchSession(
 
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (registry.nodes.get(node.name) !== node || TERMINAL_STATUSES.includes(node.status)) return;
+    if ((event.type === "message_start" || event.type === "message_update" || event.type === "message_end") && seedMessages.has(event.message)) return;
     node.lastActivityAt = Date.now();
+    if (event.type === "message_start" && event.message.role === "user") {
+      const text = contentText(event.message.content);
+      if (!awaitingTask || text !== node.prompt) transcript.user(`user:${++transcriptIndex}`, text);
+      awaitingTask = false;
+    }
+    if ((event.type === "message_start" || event.type === "message_update" || event.type === "message_end") && event.message.role === "assistant" && !accounted.has(event.message)) {
+      if (event.type === "message_start" || !transcriptMessageId) transcriptMessageId = `assistant:${++transcriptIndex}`;
+      transcript.assistant(transcriptMessageId, event.message, event.type !== "message_end");
+      for (const part of event.message.content) if (part.type === "toolCall") transcript.tool(part);
+      if (event.type === "message_end") transcriptMessageId = undefined;
+    }
+    if (event.type === "tool_execution_start") transcript.tool({ type: "toolCall", id: event.toolCallId, name: event.toolName, arguments: event.args }, true);
+    if (event.type === "tool_execution_update" || event.type === "tool_execution_end") {
+      const partial = event.type === "tool_execution_update";
+      transcript.result(event.toolCallId, event.toolName, partial ? event.partialResult : event.result, !partial && event.isError, partial);
+    }
     if (event.type === "message_start" && event.message.role === "assistant") {
       currentMessage = undefined;
       node.phase = "Generating response";
@@ -285,10 +310,6 @@ export function watchSession(
     } else if (event.type === "turn_end") {
       turns += 1;
       node.turns = turns;
-      if (node.maxTurns !== undefined && turns >= node.maxTurns && !maxTurnsHit) {
-        maxTurnsHit = true;
-        void session.abort();
-      }
     } else if (event.type === "tool_execution_start") {
       const entry: ActivityEntry = {
         id: `tool:${event.toolCallId}`, kind: "tool", title: toolTitle(event.toolName, event.args),
@@ -312,7 +333,13 @@ export function watchSession(
       lastToolActivity = Date.now();
     } else if (event.type === "agent_end" && !sawMessageEnd) {
       // Compatibility for event sources that only expose run-level usage.
-      for (const message of event.messages) account(message);
+      for (const message of event.messages) {
+        if (message.role === "assistant" && !seedMessages.has(message) && !accounted.has(message)) {
+          transcript.assistant(transcriptMessageId ?? `assistant:${++transcriptIndex}`, message, false);
+          transcriptMessageId = undefined;
+        }
+        account(message);
+      }
     } else if (event.type === "auto_retry_start" || event.type === "auto_retry_end" || event.type === "compaction_start" || event.type === "compaction_end") {
       node.phase = event.type.replaceAll("_", " ");
       record({ id: `lifecycle:${node.activity?.revision ?? 0}`, kind: "state", title: node.phase, text: "", at: Date.now() });
@@ -373,22 +400,6 @@ export function watchSession(
       return;
     }
 
-    if (maxTurnsHit) {
-      // The max-turn abort can also reject prompt(); preserve its intended
-      // partial outcome rather than treating the abort as a provider error.
-      registry.settle(node.name, {
-        status: "partial",
-        output: text,
-        stopReason: "max_turns",
-        usage: outcomeUsage,
-        turns,
-        ...(lastToolActivity !== undefined ? { lastToolActivity } : {}),
-      });
-      if (registry.hasLiveChildren(node.name)) await registry.mergeAtSettle(node.name);
-      engine?.pump();
-      return;
-    }
-
     if (errorMessage !== undefined || how === "failed") {
       // Unexpected death: adoption path (§3).
       registry.settle(node.name, {
@@ -420,7 +431,7 @@ export function watchSession(
       return;
     }
 
-    const status = maxTurnsHit || stopReason === "length" ? "partial" : "done";
+    const status = stopReason === "length" ? "partial" : "done";
     registry.settle(node.name, {
       status,
       output: text,

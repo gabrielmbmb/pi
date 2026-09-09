@@ -17,7 +17,8 @@ extensions/subagents/
 ├── config.ts         # model-routing config: load/validate/merge user + project subagents.json
 ├── routing.ts        # injected guidance block + model resolution chain at spawn
 ├── render.ts         # compact transcript/footer formatting
-├── activity.ts       # bounded observer-only event log
+├── activity.ts       # bounded observer-only preview/audit log
+├── transcript.ts     # detached, bounded SDK message/tool snapshots
 └── inspector/        # tree projection, preview, transcript, navigation, cancellation UI
 ```
 
@@ -33,7 +34,7 @@ node = {
   result,                  // retained inspection payload (see §4); store copy removed on fetch
   model, thinking, contextMode,
   onParentError,           // "adopt" (default) | "kill"
-  maxTurns, startedAt, usage
+  startedAt, usage
 }
 ```
 
@@ -53,12 +54,12 @@ The registry instance is module-scoped and **attached to `globalThis`**, so it s
 
 | Tool | Params | Behavior |
 |---|---|---|
-| `spawn_subagents` | `subagents[]` each: `{name, prompt, context: "none"\|"last_n_turns"\|"all", context_turns?, model?, thinking?, onParentError?, max_turns?, timeout_s?, model_reason?}` | Batch spawn; returns immediately per item: `{name, status: running\|queued, queuePosition, model, thinking}` (resolved routing outcome — lets the agent audit its own choices). Queued past `MAX_CONCURRENT`. Depth ≥ 3 → the tool is **unbound** (children at max depth can't attempt it). `executionMode: "parallel"` (spawns touch no shared files — safe for concurrent tool-call fan-out). Full validation table in §13. |
+| `spawn_subagents` | `subagents[]` each: `{name, prompt, context: "none"\|"last_n_turns"\|"all", context_turns?, model?, thinking?, onParentError?, timeout_s?, model_reason?}` | Batch spawn; returns immediately per item: `{name, status: running\|queued, queuePosition, model, thinking}` (resolved routing outcome — lets the agent audit its own choices). Queued past `MAX_CONCURRENT`. Depth ≥ 3 → the tool is **unbound** (children at max depth can't attempt it). `executionMode: "parallel"` (spawns touch no shared files — safe for concurrent tool-call fan-out). Full validation table in §13. |
 | `collect_subagents` | `names[]`, `timeout_s?` (0 = none) | **Parent-only.** Blocks until all listed finish (timeout → returns what's done, others marked `running` — does not cancel); streams ✓/⏳/✗ rows via `onUpdate`; returns payloads in **requested order**, per-item statuses (one child erroring doesn't fail the batch); combined `usage`; **removes results from the store.** |
 | `subagent_status` | `name?` (all) | **Any ancestor** + user. Non-blocking; status + 4 KB snippets. Late collection path. |
 | `cancel_subagent` | `name?` (omitted = **whole caller subtree**) | **Any ancestor** + user. **Cascades down the subtree** (recursively aborts sessions, including still-queued items); marks `cancelled`; emits one batched interrupt-note (§4, §13). |
 
-**Command `/subagents`:** bare → live tree + automatic preview; Enter opens a scrollable Activity / Result / Details viewer. Completed agents remain inspectable after collection/expiry. `c` confirms the selected subtree's cancellation (Keep running by default). `/subagents inspect <name>` opens one agent directly; `/subagents cancel <name|all>` confirms cancellation in UI modes; `/subagents config` shows routing diagnostics. No spawn from the command — agent-only spawning. See [README.md](README.md) for controls and retention limits.
+**Command `/subagents`:** bare → live tree + automatic preview; Enter opens a borderless native Conversation / Result / Details viewer. Completed agents remain inspectable after collection/expiry. `c` confirms the selected subtree's cancellation (Keep running by default). `/subagents inspect <name>` opens one agent directly; `/subagents cancel <name|all>` confirms cancellation in UI modes; `/subagents config` shows routing diagnostics. No spawn from the command — agent-only spawning. See [README.md](README.md) for controls and retention limits.
 
 ---
 
@@ -66,7 +67,7 @@ The registry instance is module-scoped and **attached to `globalThis`**, so it s
 
 - **Background-first.** Spawn returns instantly; the model can emit several spawn calls in one turn → parallel fan-out is the default flow, no parallel mode needed.
 - **Fan-in.** The model calls `collect_subagents` to wait — this is the "Codex orchestrator waits for all results" pattern.
-- **Merge-at-settle.** A subagent that settles with children still running auto-collects them (parent status shows transient `merging`): waits ≤ `MERGE_TIMEOUT_S`, cancels the stragglers (recursively, marked `(cut off)`), and merges children outputs into its own final output — its own text first, then `## name (status)` sections in **spawn order**, truncated from the **bottom** to 50 KB total. Only for *normal* terminations (done/partial/max_turns); error terminations take the adoption path. Every subtree completes bottom-up; nothing is ever unfetchable.
+- **Merge-at-settle.** A subagent that settles with children still running auto-collects them (parent status shows transient `merging`): waits ≤ `MERGE_TIMEOUT_S`, cancels the stragglers (recursively, marked `(cut off)`), and merges children outputs into its own final output — its own text first, then `## name (status)` sections in **spawn order**, truncated from the **bottom** to 50 KB total. Only for *normal* terminations (done/partial); error terminations take the adoption path. Every subtree completes bottom-up; nothing is ever unfetchable.
 - **Adoption.** A parent that dies **unexpectedly** (session error, `timeout_s` expiry, provider failure — *not* user cancel, which cascades) re-parents its running children to the **nearest living ancestor** (walk up the tree; always `__main__` in practice). Adopted nodes keep their original depth; the popup marks them as adopted. `onParentError: "kill"` per spawn opts out (children cancelled recursively instead).
 - **Turn-end with uncollected children at depth ≥ 1** is impossible by construction (sessions end at settle; merge-at-settle covers them). At depth 0 (main agent) uncollected results stay in the store until fetched or TTL.
 
@@ -147,11 +148,11 @@ Config, two layers (merged by rule name; project overrides):
 ```
 
 - Loaded fresh from disk on every tool call (hot reload). Validation severities: **file-level errors** (invalid JSON, duplicate rule names within a file, > `MAX_RULES`, description > `MAX_RULE_DESC_CHARS`, bad `thinking`) → hard error, spawns blocked, diagnostics via `/subagents config`; **per-rule model unresolvable** → that rule disabled + diagnostic (spawns still work); **`defaultModel` unresolvable** → warning + inherit fallback. Precedence: project > user per rule name; project `defaultModel`/`defaultThinking` win when present.
-- **Bare-id resolution** (no `/` in the id): exact `model.id` match across `ctx.modelRegistry.getAll()` → unique provider; else prefix match with exactly one candidate; else error listing top candidates. Providers with no configured auth (`hasConfiguredAuth`) match last; unresolved auth on the *chosen* model → warning only (model fallback chains may still work). Optional shortcut: `resolveCliModel()` helper (exported from `model-resolver`) if its semantics fit — evaluate in Phase 1.
+- **Authenticated resolution:** bare IDs prefer exact `model.id` matches across `ctx.modelRegistry.getAll()`, selecting the single candidate with configured auth (`hasConfiguredAuth`). Only when no exact ID exists may a unique authenticated prefix win. Provider-qualified models without auth can reroute only to one authenticated provider with the same exact model ID, with a warning and the actual provider recorded in the spawn response and inspector Details. No available candidate or multiple authenticated alternatives → per-item preflight error before starting a worker. Available explicit providers are never replaced; model IDs are never silently changed. Configured auth is not a guarantee of token validity/quota/network access, and runtime failures are not retried across providers.
 - **The agent routes by task similarity** (per user decision): injected guidance block (bullets via `promptGuidelines` on the spawn tool; same block via `DefaultResourceLoader.appendSystemPrompt` into subagent sessions at every depth) lists `name → model/thinking` + ~60-char description snippet per rule; full descriptions live in the file (readable).
 - **Resolution chain:** explicit `model`/`thinking` params (agent chose a rule) → `defaultModel`/`defaultThinking` → inherit parent session. Cheap-by-default; expensive-on-demand. No config → inherit (feature opt-in).
-- **Injection (always fresh):** a `pi.on("before_agent_start")` handler appends the current routing block to the system prompt of every main-session turn (config re-read per turn, cached; returns nothing on any error or when no config exists — idempotent, zero-risk fallback). *Spike-verified adjustment:* pi-ai has no `system` message role, so the originally planned `pi.on("context")` system-role prepend is impossible; `before_agent_start` systemPrompt chaining provides the same per-turn freshness and lands in every provider payload of that turn. Subagent sessions get the same block via `appendSystemPrompt` (built fresh per spawn, so guidance is never stale at any depth). `promptGuidelines` carries only a one-line static pointer to the config path.
-- `model_reason` param (e.g. `"rule: reading files"`) surfaced in the popup/usage line for burn auditing.
+- **Injection (always fresh):** a `pi.on("before_agent_start")` handler appends the current routing block to the system prompt of every main-session turn (config re-read per turn, cached; returns nothing on config errors, but still injects default/inheritance and provider-auth guidance when no config exists). *Spike-verified adjustment:* pi-ai has no `system` message role, so the originally planned `pi.on("context")` system-role prepend is impossible; `before_agent_start` systemPrompt chaining provides the same per-turn freshness and lands in every provider payload of that turn. Subagent sessions get the same block via `appendSystemPrompt` (built fresh per spawn, so guidance is never stale at any depth). `promptGuidelines` also encourages omission of model overrides unless needed, including for nested children, and warns against guessed provider prefixes.
+- Optional `model_reason` (e.g. `"rule: reading files"`) is audit metadata surfaced in Details. Normalize whitespace and cap the stored copy at 1,024 characters with an explicit warning; never reject a spawn for a long reason or alter the task prompt.
 
 ---
 
@@ -161,10 +162,10 @@ The implemented inspector and controls are documented in [README.md](README.md).
 
 1. **Quiet footer:** live counts and `/subagents` discoverability. Collection availability is not labeled as human review. No persistent sidebar/editor replacement.
 2. **Tree + preview:** explicit connectors and collapsible branches; current ownership including adoption; automatic task/current-tool/recent-activity preview. Stable identity-based selection and spawn order. All nodes remain inspectable; search and Active/Failed filters retain ancestor paths.
-3. **Agent viewer:** Enter opens Activity, Result, or Details at full width inside the same overlay. Activity renders own assistant messages and correlated tool results, follows output while at the end, and pauses following when scrolled up. Result shows the full retained output with error/truncation/merged-child metadata; Details includes the full delegated task and configuration.
+3. **Native conversation:** Enter initially opens Conversation for both running and completed workers. The borderless, full-width viewport uses public `UserMessageComponent`, `AssistantMessageComponent`, and `ToolExecutionComponent`, plus the renderers from public built-in tool-definition factories. The delegated task appears as a user message; assistant/tool streaming updates replace correlated entries in place. Pi's theme, output padding, code indentation, and tool expansion are reused. No timestamped activity table or enclosing inspector frame. Result remains available for retained/merged output; Details holds configuration and lifecycle/audit notices. Scrolling pauses follow, never execution.
 4. **Safe controls:** arrows select/fold, Tab switches pane focus, configured Pi selection/expansion keys are honored, and Escape unwinds UI depth without affecting work. Cancellation shows the exact active subtree and defaults to Keep running; new descendants require renewed confirmation. Partial output is preserved; file edits are never described as rolled back.
-5. **Observability:** `session.subscribe` captures streaming/tool/lifecycle events into a bounded log, independently of whether the inspector is open. Own usage updates from finalized messages, excluding inherited seed history and delegated totals. Observer updates never enter model context or invoke the model-facing lifecycle-note hook.
-6. **Rendering:** height-budgeted near-full-terminal overlay with responsive split/stacked layouts, manually owned viewports, 80 ms redraw coalescing, and a one-second heartbeat only while open. Cleanup removes timers/subscriptions on close and session teardown. Inspection never calls session-switch or collection APIs.
+5. **Observability:** `session.subscribe` captures a bounded preview/audit log and a separate structured transcript, independently of whether the inspector is open. Transcript copies retain at most 200 entries / 512,000 serialized characters, with 32,000-character payload budgets and depth/breadth limits. Tool arguments, partial/final results, and diff metadata are detached from SDK objects; thinking/signatures, inherited history, and binary image payloads are excluded. Truncation/eviction is explicit. Own usage updates from finalized messages, excluding inherited seed history and delegated totals. Observer updates never enter model context or invoke the model-facing lifecycle-note hook.
+6. **Rendering:** height-budgeted near-full-terminal overlay with responsive split/stacked layouts, manually owned viewports, 80 ms redraw coalescing, and a one-second heartbeat only while open. Cleanup removes timers/subscriptions on close and session teardown. Inspection never calls session-switch or collection APIs, executes worker tools, recomputes edit previews from current files, or starts native shell-renderer timers. Only rendering functions are retained from tool definitions. SDK terminal prompt markers are stripped before virtualized painting. Older workers use a labeled summary fallback rather than invented arguments or diffs.
 7. **Transcript integration:** existing start/completion entries, cancellation/adoption notes, completion notifications, and collect progress remain. Persisted completion entries provide view-only history across restarts; the live inspector itself is session-local.
 8. **Mode guards:** custom components are TUI-only; RPC command notifications and model-facing status/collection remain independent. Legacy workers surviving an upgrade cannot retroactively expose events that were never captured.
 
@@ -183,7 +184,7 @@ RESULT_STORE_MAX: 20,        // LRU of done results before TTL
 DEFAULT_ON_PARENT_ERROR: "adopt",
 MAX_RULES: 20, MAX_RULE_DESC_CHARS: 200, GUIDANCE_SNIPPET_CHARS: 60,
 // validation bounds (see §13)
-MAX_NAME_LEN: 40, MAX_TURNS: 50, MAX_CONTEXT_TURNS: 30, SPAWN_TIMEOUT_MAX_S: 3600,
+MAX_NAME_LEN: 40, MAX_CONTEXT_TURNS: 30, SPAWN_TIMEOUT_MAX_S: 3600,
 // teardown policy: cancel-all + dispose on quit | new | resume | fork; KEEP on reload
 ```
 
@@ -194,7 +195,7 @@ MAX_NAME_LEN: 40, MAX_TURNS: 50, MAX_CONTEXT_TURNS: 30, SPAWN_TIMEOUT_MAX_S: 360
 - `DefaultResourceLoader({ cwd, agentDir, noExtensions: true, noSkills: true, noPromptTemplates: true, appendSystemPrompt: [routingBlock] })` — no extension re-discovery → no recursion; context files (AGENTS.md) stay loaded. One loader instance is built **per spawn call and shared across the batch** (avoids repeated reload cost).
 - Tools: allowlist `read/bash/edit/write` default plus the **bound subagent tool names** — a `createAgentSession` `tools` allowlist silently disables any `customTools` name not listed (spike finding). At depth == `MAX_DEPTH` the **spawn tool is unbound** (nothing to spawn into), matching Claude Code's depth-limit behavior.
 - Model/thinking: per §6; children inherit from their parent session's resolved model.
-- Session lifecycle: `session.abort()` on cancel (cascade), `dispose()` on teardown; `turn_end` counting for `max_turns` (`agent_end` is emitted once for the overall prompt run).
+- Session lifecycle: `session.abort()` on cancel (cascade), `dispose()` on teardown; `turn_end` counting for reporting only (no turn limit) (`agent_end` is emitted once for the overall prompt run).
 
 ## 10. Spike risks (validate first)
 
@@ -215,7 +216,7 @@ Claude Code: notify-then-pull; summary-only results; nested subagents with depth
 ## 12. v2 backlog
 
 - `isolation: "worktree"` (reuse this repo's `worktree.ts` machinery) — solves cross-session file races.
-- Per-rule `tools`/`max_turns` profiles; `timeout_s` refinement.
+- Per-rule `tools` profiles; `timeout_s` refinement.
 - Batch-spawn token optimization if multi-call fan-out proves hungry.
 - Persistent/reconstructable inspector history across process restarts and transcript search.
 - Role definition files (agent markdown w/ frontmatter) if named roles ever return.
@@ -231,9 +232,8 @@ Claude Code: notify-then-pull; summary-only results; nested subagents with depth
 | `context_turns` | required iff `last_n_turns`; 1–30 |
 | `model`/`thinking` | resolvable per §6 (else error with candidates); thinking enum |
 | `onParentError` | `adopt` (default) \| `kill` |
-| `max_turns` | 1–50; counted by the child session's `turn_end` events (one model/tool cycle; `agent_end` is run-level); reached → stop, status `partial` |
 | `timeout_s` | 1–3600; expiry → abort, status `error`, stopReason `timeout`; running children go down the adoption path |
-| `model_reason` | ≤ 80 chars, free-form (audit only) |
+| `model_reason` | Optional string, audit only. Normalize whitespace; truncate storage beyond 1,024 chars with a warning, not a validation error. |
 | depth | spawn tool unbound at depth == `MAX_DEPTH` |
 | empty batch | `subagents: []` → error |
 
@@ -257,7 +257,7 @@ Claude Code: notify-then-pull; summary-only results; nested subagents with depth
 
 ## 14. Implementation order & spike acceptance (handoff plan)
 
-**Phase 0 — spike (throwaway `spike/` dir, delete after):** verify the seven §10 risks against the **nix-managed runtime pi 0.85.1** — that is the version the extension executes in, even though the repo's `devDependencies`/`node_modules` pin `@earendil-works/pi-coding-agent` 0.80.6 (stale local tooling only). Canonical reference: `/nix/store/nmqcsavb2l9fbq560slb8iq1a5xfjnbq-pi-coding-agent-0.85.1/lib/node_modules/@earendil-works/pi-coding-agent/` (docs/, examples/, and full `dist/*.d.ts` typings).
+**Phase 0 — spike (throwaway `spike/` dir, delete after):** verify the seven §10 risks against the **nix-managed runtime pi 0.85.1** — that is the version the extension executes in, the original spike used stale 0.80.6 development dependencies, since aligned to 0.85.1 for native conversation parity tests. Canonical reference: `/nix/store/nmqcsavb2l9fbq560slb8iq1a5xfjnbq-pi-coding-agent-0.85.1/lib/node_modules/@earendil-works/pi-coding-agent/` (docs/, examples/, and full `dist/*.d.ts` typings).
 1. Seeds via `inMemory(..., entries)` are visible to grandchildren (`getBranch()` at depth 2). If not: fall back to `agent.state.messages` assignment and accept depth-≥2 `all`-context degradation (note in §10).
 2. Abort propagation: tool `signal` → `session.abort()` → recursive children abort.
 3. Usage aggregation from `agent_end` messages into tool result `usage`.

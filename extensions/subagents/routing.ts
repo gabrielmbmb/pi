@@ -16,7 +16,7 @@ import {
   MAX_MODEL_CANDIDATES,
   type ThinkingLevelName,
 } from "./constants.ts";
-import type { RoutingRule, SubagentsConfig } from "./config.ts";
+import type { SubagentsConfig } from "./config.ts";
 
 /** Structural slice of a Model that routing needs. */
 export interface ModelLike {
@@ -33,11 +33,11 @@ export interface ModelRegistryLike {
 
 export interface ResolvedModelRef {
   model?: ModelLike;
-  /** Hard failure: unresolvable or ambiguous. */
+  /** Hard failure: unknown, unauthenticated, or ambiguous. */
   error?: string;
-  /** Soft note: resolved, but the provider has no configured auth. */
+  /** Explicit notice when the same model ID was rerouted to an authenticated provider. */
   warning?: string;
-  /** Top candidates for error display, auth-configured first. */
+  /** Auth-configured candidates for error display. */
   candidates?: string[];
 }
 
@@ -45,85 +45,62 @@ export function modelLabel(model: ModelLike): string {
   return `${model.provider}/${model.id}`;
 }
 
-function authFirst(models: ModelLike[], registry: ModelRegistryLike): ModelLike[] {
-  const withAuth = models.filter((model) => registry.hasConfiguredAuth(model));
-  const withoutAuth = models.filter((model) => !registry.hasConfiguredAuth(model));
-  return [...withAuth, ...withoutAuth];
-}
-
 function candidateList(models: ModelLike[]): string[] {
   return models.slice(0, MAX_MODEL_CANDIDATES).map(modelLabel);
 }
 
 /**
- * Resolve a model reference: `provider/modelId` or a bare model id.
- *
- * Bare ids: exact `model.id` match must be unique across providers; else a
- * prefix match must yield exactly one candidate (providers with no configured
- * auth match last — a unique auth-configured candidate beats no-auth ones);
- * else an error listing the top candidates.
+ * Resolve only auth-configured overrides. Bare IDs prefer exact matches, then
+ * unique authenticated prefixes. An explicitly named unauthenticated provider
+ * can reroute only to a single authenticated provider with the SAME model ID.
+ * Never silently choose another model or guess between available providers.
  */
 export function resolveModelRef(reference: string, registry: ModelRegistryLike): ResolvedModelRef {
   const trimmed = reference.trim();
   if (!trimmed) return { error: "Empty model reference" };
 
   const all = registry.getAll();
+  const available = all.filter((model) => registry.hasConfiguredAuth(model));
   const lower = trimmed.toLowerCase();
-
   const slashIndex = trimmed.indexOf("/");
   if (slashIndex > 0 && slashIndex < trimmed.length - 1) {
     const provider = trimmed.slice(0, slashIndex).trim().toLowerCase();
     const modelId = trimmed.slice(slashIndex + 1).trim().toLowerCase();
-    const matches = all.filter(
-      (model) => model.provider.toLowerCase() === provider && model.id.toLowerCase() === modelId,
-    );
-    if (matches.length === 1) return withAuthWarning(matches[0], registry);
+    const requested = all.find((model) => model.provider.toLowerCase() === provider && model.id.toLowerCase() === modelId);
+    if (requested) {
+      if (available.includes(requested)) return { model: requested };
+      const alternatives = available.filter((model) => model.id.toLowerCase() === modelId);
+      if (alternatives.length === 1) return {
+        model: alternatives[0],
+        warning: `No configured auth for ${modelLabel(requested)}; using ${modelLabel(alternatives[0]!)} (same model ID).`,
+      };
+      return {
+        error: `No configured auth for ${modelLabel(requested)}; ${alternatives.length ? "multiple authenticated providers offer this model; choose provider/modelId" : "configure credentials or omit model to inherit the parent"}`,
+        ...(alternatives.length ? { candidates: candidateList(alternatives) } : {}),
+      };
+    }
     return {
       error: `No model matches "${trimmed}"`,
-      candidates: candidateList(authFirst(all.filter((m) => m.id.toLowerCase().includes(modelId)), registry)),
+      candidates: candidateList(available.filter((model) => model.id.toLowerCase().includes(modelId))),
     };
   }
 
-  // Bare id: exact match, unique provider.
   const exact = all.filter((model) => model.id.toLowerCase() === lower);
-  if (exact.length === 1) return withAuthWarning(exact[0], registry);
-  if (exact.length > 1) {
-    return {
-      error: `"${trimmed}" matches models from multiple providers; use provider/modelId`,
-      candidates: candidateList(authFirst(exact, registry)),
-    };
-  }
+  const matches = exact.length ? exact : all.filter((model) => model.id.toLowerCase().startsWith(lower));
+  const authenticated = matches.filter((model) => available.includes(model));
+  if (authenticated.length === 1) return { model: authenticated[0] };
+  if (authenticated.length > 1) return {
+    error: exact.length ? `"${trimmed}" matches models from multiple authenticated providers; use provider/modelId` : `"${trimmed}" is ambiguous; matching authenticated models:`,
+    candidates: candidateList(authenticated),
+  };
+  if (matches.length) return {
+    error: `No configured auth for models matching "${trimmed}"; configure credentials or omit model to inherit the parent`,
+  };
 
-  // Prefix match; auth-configured providers match last, so a unique
-  // auth-configured candidate wins over no-auth ones.
-  const prefix = all.filter((model) => model.id.toLowerCase().startsWith(lower));
-  const prefixWithAuth = prefix.filter((model) => registry.hasConfiguredAuth(model));
-  if (prefixWithAuth.length === 1) return withAuthWarning(prefixWithAuth[0], registry);
-  if (prefix.length === 1) return withAuthWarning(prefix[0], registry);
-  if (prefix.length > 1) {
-    return {
-      error: `"${trimmed}" is ambiguous; matching models:`,
-      candidates: candidateList(authFirst(prefix, registry)),
-    };
-  }
-
-  // Nothing by prefix; offer substring matches as candidates.
-  const loose = all.filter(
-    (model) =>
-      model.id.toLowerCase().includes(lower) || model.name?.toLowerCase().includes(lower),
-  );
+  const loose = available.filter((model) => model.id.toLowerCase().includes(lower) || model.name?.toLowerCase().includes(lower));
   return {
     error: `No model matches "${trimmed}"`,
-    ...(loose.length > 0 ? { candidates: candidateList(authFirst(loose, registry)) } : {}),
-  };
-}
-
-function withAuthWarning(model: ModelLike, registry: ModelRegistryLike): ResolvedModelRef {
-  if (registry.hasConfiguredAuth(model)) return { model };
-  // Warning only: model fallback chains may still work.
-  return {
-    model,
-    warning: `No configured auth for ${modelLabel(model)}; the spawn may fail at runtime`,
+    ...(loose.length ? { candidates: candidateList(loose) } : {}),
   };
 }
 
@@ -229,8 +206,15 @@ function snippet(text: string): string {
   return `${collapsed.slice(0, GUIDANCE_SNIPPET_CHARS - 1)}…`;
 }
 
+const SPAWN_MODEL_GUIDANCE =
+  "For spawn_subagents, omit model unless a task needs an override: omission uses the configured default, otherwise inherits your current provider/model unchanged (also for nested children). " +
+  "When overriding, copy an available fully qualified provider/modelId from routing guidance when provided; do not guess provider prefixes. " +
+  "openai and openai-codex are different providers with separate credentials. " +
+  "An unavailable provider is rerouted only when exactly one authenticated provider offers the same model ID, and the spawn response reports that change. " +
+  "model_reason is optional audit metadata; keep it concise. Long reasons are truncated, not rejected.";
+
 export interface RoutingBlockResult {
-  /** Ready-to-inject guidance block; empty string when there is nothing to say. */
+  /** Ready-to-inject guidance, including safe defaults even without a config. */
   block: string;
   /** Rules whose model did not resolve (disabled; surfaced as diagnostics). */
   disabledRules: { name: string; reason: string }[];
@@ -250,13 +234,14 @@ export function buildRoutingBlock(
   paths: { userPath: string; projectPath: string },
 ): RoutingBlockResult {
   if (!config || (config.rules.length === 0 && !config.defaultModel && !config.defaultThinking)) {
-    return { block: "", disabledRules: [] };
+    return { block: SPAWN_MODEL_GUIDANCE, disabledRules: [] };
   }
 
   const lines: string[] = [];
   const disabledRules: { name: string; reason: string }[] = [];
   let defaultWarning: string | undefined;
 
+  lines.push(SPAWN_MODEL_GUIDANCE);
   lines.push("Subagent model routing (config: " + [paths.userPath, paths.projectPath].join(", ") + "):");
 
   for (const rule of config.rules) {
@@ -268,6 +253,7 @@ export function buildRoutingBlock(
     }
     const target = modelLabel(resolved.model) + (rule.thinking ? ` (thinking: ${rule.thinking})` : "");
     lines.push(`- ${rule.name} → ${target} — ${snippet(rule.description)}`);
+    if (resolved.warning) lines.push(`  Note: ${resolved.warning}`);
   }
 
   if (config.defaultModel) {
@@ -275,6 +261,10 @@ export function buildRoutingBlock(
     if (resolved.model) {
       const target = modelLabel(resolved.model) + (config.defaultThinking ? ` (thinking: ${config.defaultThinking})` : "");
       lines.push(`Default for spawned subagents: ${target}`);
+      if (resolved.warning) {
+        defaultWarning = resolved.warning;
+        lines.push(`  Note: ${resolved.warning}`);
+      }
     } else {
       defaultWarning = `defaultModel "${config.defaultModel}" is not resolvable (${resolved.error}); subagents inherit the parent model`;
       lines.push(`Default for spawned subagents: inherited (configured default "${config.defaultModel}" is unresolvable)`);
@@ -284,16 +274,17 @@ export function buildRoutingBlock(
   }
 
   lines.push(
-    "When spawning subagents, pick model/thinking by task similarity to these rules, pass them via the model/thinking params, and record the choice in model_reason. Full rule descriptions live in the config files.",
+    "If a task matches an available rule, copy that rule's model/thinking target; otherwise leave model unset for the configured default or inheritance. " +
+    "Never use unavailable rules. Optionally record the choice in model_reason. Full rule descriptions live in the config files.",
   );
 
   return { block: lines.join("\n"), disabledRules, ...(defaultWarning ? { defaultWarning } : {}) };
 }
 
 /**
- * Static promptGuidelines for the spawn tool: a one-line pointer only. The
+ * Static promptGuidelines for the spawn tool. The
  * live rule list is injected per turn / per spawn so it is never stale.
  */
 export const SPAWN_TOOL_GUIDELINES = [
-  "Use spawn_subagents to delegate self-contained tasks to parallel background subagents instead of doing every subtask yourself; check the injected subagent model-routing guidance (or /subagents config) to pick an appropriate model/thinking, and always collect_subagents before reporting results.",
+  "Use spawn_subagents to delegate self-contained tasks to parallel background subagents; prefer leaving model unset for the configured default or inheritance, and never guess provider prefixes. For overrides, copy an available target from the injected routing guidance. model_reason is optional and long reasons are truncated. Always collect_subagents before reporting results.",
 ];

@@ -21,7 +21,7 @@ import {
   findTrimIndex,
   toSeedEntries,
 } from "../extensions/subagents/context.ts";
-import { MAX_CONTEXT_TURNS, NAME_REGEX } from "../extensions/subagents/constants.ts";
+import { MAX_CONTEXT_TURNS, MAX_MODEL_REASON_CHARS, NAME_REGEX } from "../extensions/subagents/constants.ts";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ async function writeConfig(root, kind, content) {
   await writeFile(join(dir, "subagents.json"), content, "utf8");
 }
 
-function fakeRegistry(models, authed = []) {
+function fakeRegistry(models, authed = models.map((model) => `${model.provider}/${model.id}`)) {
   const authSet = new Set(authed);
   return {
     getAll() {
@@ -291,7 +291,7 @@ test("routing: bare exact id ambiguous across providers errors with candidates",
   // "gpt-5.5" exists on openai and groq.
   const resolved = resolveModelRef("gpt-5.5", fakeRegistry(MODELS));
   assert.ok(resolved.error);
-  assert.match(resolved.error, /multiple providers/);
+  assert.match(resolved.error, /multiple authenticated providers/);
   assert.ok(resolved.candidates.includes("openai/gpt-5.5"));
   assert.ok(resolved.candidates.includes("groq/gpt-5.5"));
 });
@@ -303,8 +303,8 @@ test("routing: unique prefix match resolves", () => {
 
 test("routing: ambiguous prefix resolves to the single auth-configured candidate", () => {
   // "gpt-5.5-m" prefix-matches openai/gpt-5.5-mini and groq/gpt-5.5-mirror.
-  const none = resolveModelRef("gpt-5.5-m", fakeRegistry(MODELS));
-  assert.match(none.error, /ambiguous/);
+  const both = resolveModelRef("gpt-5.5-m", fakeRegistry(MODELS));
+  assert.match(both.error, /ambiguous/);
 
   const openaiWins = resolveModelRef("gpt-5.5-m", fakeRegistry(MODELS, ["openai/gpt-5.5-mini"]));
   assert.equal(openaiWins.model?.id, "gpt-5.5-mini");
@@ -315,15 +315,13 @@ test("routing: ambiguous prefix resolves to the single auth-configured candidate
   assert.equal(groqWins.model?.id, "gpt-5.5-mirror");
 });
 
-test("routing: providers without auth list last among candidates", () => {
-  // Exact "gpt-5.5" is ambiguous (openai + groq); auth-configured provider lists first.
-  const registry = fakeRegistry(MODELS, ["groq/gpt-5.5"]);
-  const ambiguous = resolveModelRef("gpt-5.5", registry);
-  assert.ok(ambiguous.error);
-  assert.equal(ambiguous.candidates[0], "groq/gpt-5.5");
+test("routing: bare exact IDs prefer the single authenticated provider", () => {
+  const resolved = resolveModelRef("gpt-5.5", fakeRegistry(MODELS, ["groq/gpt-5.5"]));
+  assert.equal(resolved.error, undefined);
+  assert.equal(resolved.model.provider, "groq");
 });
 
-test("routing: ambiguous prefix with no auth winner errors listing candidates", () => {
+test("routing: ambiguous authenticated prefixes error with available candidates", () => {
   const models = [
     { provider: "a", id: "model-x-1" },
     { provider: "b", id: "model-x-2" },
@@ -341,10 +339,10 @@ test("routing: slash reference resolves and unknown ones error with candidates",
   assert.match(missing.error, /No model matches/);
 });
 
-test("routing: unresolved auth on the chosen model is a warning only", () => {
-  const resolved = resolveModelRef("gemini-3.1-pro", fakeRegistry(MODELS)); // no auth configured
-  assert.equal(resolved.model?.id, "gemini-3.1-pro");
-  assert.match(resolved.warning, /No configured auth/);
+test("routing: models without configured auth fail preflight, not at runtime", () => {
+  const resolved = resolveModelRef("gemini-3.1-pro", fakeRegistry(MODELS, []));
+  assert.equal(resolved.model, undefined);
+  assert.match(resolved.error, /No configured auth/);
 });
 
 test("routing: empty reference errors", () => {
@@ -441,10 +439,88 @@ test("routing: guidance block default handling and empty config", () => {
   assert.match(withDefault.defaultWarning ?? "", /no-such-model/);
 
   const empty = buildRoutingBlock(null, fakeRegistry(MODELS), { userPath: "u", projectPath: "p" });
-  assert.equal(empty.block, "");
+  assert.match(empty.block, /omit model/);
+  assert.match(empty.block, /openai and openai-codex are different providers/);
+  assert.match(empty.block, /nested children/);
 
   assert.equal(SPAWN_TOOL_GUIDELINES.length, 1);
   assert.match(SPAWN_TOOL_GUIDELINES[0], /spawn_subagents/);
+});
+
+const PROVIDER_MODELS = [
+  { provider: "openai", id: "gpt-5.4" },
+  { provider: "openai-codex", id: "gpt-5.4" },
+  { provider: "other", id: "gpt-5.4" },
+  { provider: "openai-codex", id: "gpt-5.4-mini" },
+];
+
+test("routing: unavailable explicit provider reroutes only the same model ID", () => {
+  const registry = fakeRegistry(PROVIDER_MODELS, ["openai-codex/gpt-5.4"]);
+  const resolved = resolveModelRef("openai/gpt-5.4", registry);
+  assert.equal(resolved.model, PROVIDER_MODELS[1]);
+  assert.equal(resolved.error, undefined);
+  assert.match(resolved.warning, /No configured auth for openai\/gpt-5\.4; using openai-codex\/gpt-5\.4/);
+  assert.match(resolved.warning, /same model ID/);
+  assert.equal(resolveModelRef("gpt-5.4", registry).model, PROVIDER_MODELS[1]);
+});
+
+test("routing: available explicit providers are never silently replaced", () => {
+  const resolved = resolveModelRef("openai/gpt-5.4", fakeRegistry(PROVIDER_MODELS));
+  assert.equal(resolved.model, PROVIDER_MODELS[0]);
+  assert.equal(resolved.warning, undefined);
+});
+
+test("routing: unavailable exact IDs cannot fall through to different models", () => {
+  const registry = fakeRegistry(PROVIDER_MODELS, ["openai-codex/gpt-5.4-mini"]);
+  for (const reference of ["openai/gpt-5.4", "gpt-5.4"]) {
+    const resolved = resolveModelRef(reference, registry);
+    assert.equal(resolved.model, undefined);
+    assert.match(resolved.error, /No configured auth/);
+  }
+  assert.match(resolveModelRef("invented/gpt-5.4-mini", registry).error, /No model matches/);
+});
+
+test("routing: provider fallback ambiguity requires an explicit available target", () => {
+  const registry = fakeRegistry(PROVIDER_MODELS, ["openai-codex/gpt-5.4", "other/gpt-5.4"]);
+  const resolved = resolveModelRef("openai/gpt-5.4", registry);
+  assert.equal(resolved.model, undefined);
+  assert.match(resolved.error, /multiple authenticated providers/);
+  assert.deepEqual(resolved.candidates, ["openai-codex/gpt-5.4", "other/gpt-5.4"]);
+  const bare = resolveModelRef("gpt-5.4", registry);
+  assert.equal(bare.model, undefined);
+  assert.deepEqual(bare.candidates, resolved.candidates);
+});
+
+test("routing: auth availability is rechecked for each resolution", () => {
+  const providers = new Set(["openai-codex"]);
+  const registry = { getAll: () => PROVIDER_MODELS, hasConfiguredAuth: (model) => providers.has(model.provider) };
+  assert.equal(resolveModelRef("openai/gpt-5.4", registry).model.provider, "openai-codex");
+  providers.add("openai");
+  assert.equal(resolveModelRef("openai/gpt-5.4", registry).model.provider, "openai");
+  providers.clear();
+  assert.match(resolveModelRef("openai/gpt-5.4", registry).error, /No configured auth/);
+});
+
+test("routing: defaults and guidance use canonical authenticated targets", () => {
+  const config = {
+    defaultModel: "openai/gpt-5.4",
+    rules: [
+      { name: "research", description: "Investigate", model: "openai/gpt-5.4" },
+      { name: "unavailable", description: "Mini tasks", model: "openai-codex/gpt-5.4-mini" },
+    ],
+  };
+  const registry = fakeRegistry(PROVIDER_MODELS, ["openai-codex/gpt-5.4"]);
+  const block = buildRoutingBlock(config, registry, { userPath: "u", projectPath: "p" });
+  assert.match(block.block, /research → openai-codex\/gpt-5\.4/);
+  assert.match(block.block, /Default for spawned subagents: openai-codex\/gpt-5\.4/);
+  assert.match(block.defaultWarning, /using openai-codex/);
+  assert.equal(block.disabledRules[0].name, "unavailable");
+  assert.match(block.disabledRules[0].reason, /No configured auth/);
+  const parent = { model: PROVIDER_MODELS[1], thinking: "medium" };
+  assert.equal(resolveSpawnRouting({}, config, registry, parent).model, parent.model);
+  const unavailableDefault = resolveSpawnRouting({}, { defaultModel: "openai-codex/gpt-5.4-mini", rules: [] }, registry, parent);
+  assert.equal(unavailableDefault.modelSource, "inherited");
+  assert.match(unavailableDefault.warnings[0], /No configured auth/);
 });
 
 // ── context.ts ─────────────────────────────────────────────────────────────
@@ -1149,14 +1225,90 @@ test("tools: collect waits without a signal and status-by-name is scoped", async
   assert.equal(isAncestorOf(r, ROOT_AGENT_NAME, "other"), true);
 });
 
+test("tools: model_reason is optional audit text, not a hidden rejection limit", () => {
+  const input = { name: "worker", prompt: "unchanged task", context: "none" };
+  const reason = "A detailed routing explanation that reasonably exceeds eighty characters without being an oversized audit record.";
+  assert.ok(reason.length > 80);
+  assert.equal(validateSpawnItem({ ...input, model_reason: reason }).modelReason, reason);
+  assert.equal(validateSpawnItem({ ...input, model_reason: "" }).modelReason, undefined);
+  assert.match(validateSpawnItem({ ...input, model_reason: 12 }).error, /must be a string/);
+  const boundary = validateSpawnItem({ ...input, model_reason: "x".repeat(MAX_MODEL_REASON_CHARS) });
+  assert.equal(boundary.modelReason.length, MAX_MODEL_REASON_CHARS);
+  assert.equal(boundary.modelReasonTruncated, undefined);
+  const normalized = validateSpawnItem({ ...input, model_reason: "  rule:\n\t reading   files  " });
+  assert.equal(normalized.modelReason, "rule: reading files");
+  const truncated = validateSpawnItem({ ...input, model_reason: "x".repeat(MAX_MODEL_REASON_CHARS + 100) });
+  assert.equal(truncated.error, undefined);
+  assert.equal(truncated.modelReason.length, MAX_MODEL_REASON_CHARS);
+  assert.equal(truncated.modelReasonTruncated, true);
+  assert.ok(truncated.modelReason.endsWith("…"));
+  assert.equal(truncated.prompt, input.prompt);
+  const unicode = validateSpawnItem({ ...input, model_reason: "x".repeat(MAX_MODEL_REASON_CHARS - 2) + "😀😀" });
+  assert.equal(Buffer.from(unicode.modelReason).toString("utf8"), unicode.modelReason);
+});
+
+test("tools: nested batch spawns accept long reasons and use the authenticated provider", async () => {
+  const root = await makeTempDirs();
+  try {
+    const registry = reg();
+    spawn(registry, "intelligence");
+    const requests = [];
+    const caller = {
+      name: "intelligence", depth: 1, cwd: root.cwd, agentDir: root.agentDir,
+      historyEntries: () => [],
+      parentModel: { model: PROVIDER_MODELS[1], thinking: "medium" },
+      modelRegistry: fakeRegistry(PROVIDER_MODELS, ["openai-codex/gpt-5.4"]),
+    };
+    const tool = makeSubagentTools(() => caller, { registry, start: (request) => requests.push(request) })
+      .find((tool) => tool.name === "spawn_subagents");
+    const reason = "Use this model for a substantial intelligence research task because it supports deep analysis, tool use, and a focused review of the available evidence.";
+    const response = await tool.execute("spawn", { subagents: [
+      { name: "explicit", model: "openai/gpt-5.4", prompt: "first task", context: "none", model_reason: reason },
+      { name: "bare", model: "gpt-5.4", prompt: "second task", context: "none", model_reason: reason },
+      { name: "inherited", prompt: "third task", context: "none", model_reason: reason.repeat(30) },
+    ] }, undefined, undefined, {});
+    assert.equal(requests.length, 3);
+    assert.match(response.content[0].text, /3\/3 spawned/);
+    for (const request of requests) {
+      assert.equal(request.model, PROVIDER_MODELS[1]);
+      assert.equal(request.node.parentName, "intelligence");
+      assert.equal(request.node.model, "openai-codex/gpt-5.4");
+      assert.match(request.routingBlock, /do not guess provider prefixes/);
+      assert.match(request.routingBlock, /nested children/);
+    }
+    assert.equal(requests[0].node.modelReason, reason);
+    assert.match(response.details.spawned[0].warnings[0], /using openai-codex/);
+    assert.match(response.details.spawned[2].warnings[0], /model_reason was truncated to 1024/);
+    assert.deepEqual(requests[0].node.warnings, response.details.spawned[0].warnings);
+    assert.equal(requests[2].prompt, "third task");
+    assert.equal(Object.hasOwn(tool.parameters.properties.subagents.items.properties, "max_turns"), false);
+    assert.equal(Object.hasOwn(requests[0].node, "maxTurns"), false);
+    const schema = tool.parameters.properties.subagents.items.properties.model_reason;
+    assert.equal(schema.maxLength, undefined);
+    assert.match(schema.description, /1024.*truncated.*not rejected/);
+
+    const rejected = await tool.execute("bad", { subagents: [
+      { name: "unauthenticated", model: "openai-codex/gpt-5.4-mini", prompt: "task", context: "none" },
+    ] }, undefined, undefined, {});
+    assert.match(rejected.details.spawned[0].error, /No configured auth/);
+    assert.equal(requests.length, 3);
+    assert.equal(registry.nodes.has("unauthenticated"), false);
+  } finally {
+    await root.cleanup();
+  }
+});
+
 // ── session.ts / render.ts ─────────────────────────────────────────────────
 
-test("session: watchSession aggregates usage and marks max-turn termination partial", async () => {
+test("session: turns are counted without a turn limit or automatic abort", async () => {
   const r = reg();
-  spawn(r, "watched", ROOT_AGENT_NAME, { maxTurns: 1 });
+  spawn(r, "watched");
+  // A retained pre-upgrade node can still carry this obsolete field.
+  r.nodes.get("watched").maxTurns = 1;
   run(r, "watched");
   let listener;
   let unsubscribed = false;
+  let aborts = 0;
   const session = {
     messages: [],
     subscribe(callback) {
@@ -1165,7 +1317,7 @@ test("session: watchSession aggregates usage and marks max-turn termination part
         unsubscribed = true;
       };
     },
-    async abort() {},
+    async abort() { aborts++; },
   };
   let pumped = 0;
   const finish = watchSession(r, r.nodes.get("watched"), session, {
@@ -1178,21 +1330,49 @@ test("session: watchSession aggregates usage and marks max-turn termination part
 
   session.messages.push({
     role: "assistant",
-    content: [{ type: "text", text: "partial answer" }],
-    stopReason: "aborted",
+    content: [{ type: "text", text: "complete answer" }],
+    stopReason: "stop",
     usage: { input: 4, output: 6, cacheRead: 0, cacheWrite: 0, totalTokens: 10, cost: { total: 0.2 } },
   });
-  listener({ type: "turn_end" });
+  for (let i = 0; i < 61; i++) listener({ type: "turn_end" });
+  assert.equal(aborts, 0);
+  assert.equal(r.nodes.get("watched").status, "running");
   listener({ type: "agent_end", messages: session.messages });
-  await finish("failed", new Error("aborted by max-turn guard"));
+  await finish("completed");
 
   const result = r.store.fetch("watched");
-  assert.equal(result.status, "partial");
-  assert.equal(result.stopReason, "max_turns");
-  assert.equal(result.output, "partial answer");
+  assert.equal(result.status, "done");
+  assert.equal(result.stopReason, "stop");
+  assert.equal(result.turns, 61);
+  assert.equal(result.output, "complete answer");
   assert.deepEqual(result.usage, { inputTokens: 4, outputTokens: 6, cost: 0.2 });
   assert.equal(unsubscribed, true);
   assert.equal(pumped, 1);
+});
+
+test("session: provider truncation, errors, and cancellation retain their classifications", async () => {
+  for (const [stopReason, status] of [["length", "partial"], ["error", "error"], ["aborted", "cancelled"]]) {
+    const r = reg();
+    spawn(r, "worker");
+    run(r, "worker");
+    let listener;
+    const session = { messages: [], subscribe(fn) { listener = fn; return () => {}; }, async abort() {} };
+    const finish = watchSession(r, r.nodes.get("worker"), session);
+    const message = {
+      role: "assistant", content: [{ type: "text", text: "retained text" }], stopReason,
+      ...(stopReason === "error" ? { errorMessage: "provider failed" } : {}),
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+    };
+    session.messages.push(message);
+    listener({ type: "message_end", message });
+    listener({ type: "turn_end" });
+    await finish("completed");
+    const result = r.store.fetch("worker");
+    assert.equal(result.status, status);
+    assert.equal(result.stopReason, stopReason);
+    assert.equal(result.output, "retained text");
+    assert.equal(result.turns, 1);
+  }
 });
 
 test("session: timeout abort is classified as timeout error", async () => {

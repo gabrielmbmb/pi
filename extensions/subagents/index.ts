@@ -12,6 +12,7 @@
 
 import {
   getAgentDir,
+  SettingsManager,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -228,7 +229,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     try {
       const loaded = loadRoutingConfig(getAgentDir(), ctx.cwd);
-      if (loaded.fileErrors.length > 0 || !loaded.config) return;
+      if (loaded.fileErrors.length > 0) return;
       const block = buildRoutingBlock(loaded.config, ctx.modelRegistry, loaded).block;
       if (!block) return;
       return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
@@ -354,6 +355,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         return;
       }
 
+      const displaySettings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted?.() ?? false });
+      inspectorState.expandedTools = ctx.ui.getToolsExpanded?.() ?? inspectorState.expandedTools;
       await ctx.ui.custom<void>(
         (tui, theme, keybindings, done) => {
           let closed = false;
@@ -388,7 +391,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             theme,
             close,
             requestRender,
-            { state: inspectorState, keybindings, height: () => Math.max(3, tui.terminal.rows - 2), inspect },
+            { state: inspectorState, keybindings, height: () => Math.max(3, tui.terminal.rows), inspect,
+              tui, cwd: ctx.cwd, outputPad: displaySettings.getOutputPad(), codeBlockIndent: displaySettings.getCodeBlockIndent() },
           );
           const subscribe = (registry as typeof registry & {
             subscribe?: (listener: (note: string) => void) => () => void;
@@ -407,7 +411,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             width: "100%",
             maxHeight: "100%",
             anchor: "center",
-            margin: 1,
+            margin: 0,
           },
         },
       );
