@@ -10,6 +10,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import worktreeExtension, {
 	createWorktreeSession,
 	ensureWorktree,
+	formatWorktreeResumeCommand,
 	parseLaunchFlags,
 	parseWorktreeCommandArguments,
 	removeWorktreeArguments,
@@ -106,6 +107,13 @@ test("replaces the parent session when resuming inside a worktree", () => {
 			"worktree-session",
 		),
 		["--session", "worktree-session", "prompt"],
+	);
+});
+
+test("formats a worktree-aware resume command", () => {
+	assert.equal(
+		formatWorktreeResumeCommand("feature/example", "/tmp/session file's.jsonl"),
+		"pi --worktree feature/example --worktree-session '/tmp/session file'\\''s.jsonl'",
 	);
 });
 

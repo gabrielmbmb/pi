@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, statSync, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 
 import {
   SessionManager,
@@ -10,6 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 const WORKTREE_DIRECTORY = ".agents/worktrees";
+const WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE = "PI_WORKTREE_RESUME_BRANCH";
 const GIT_COMMAND_TIMEOUT_MILLISECONDS = 30_000;
 
 type GitRunner = (arguments_: string[], cwd: string) => Promise<ExecResult>;
@@ -86,6 +88,21 @@ export function parseLaunchFlags(arguments_: readonly string[]): {
   };
 }
 
+function quoteShellArgument(argument: string): string {
+  if (/^[a-zA-Z0-9_\-./~:@]+$/.test(argument)) return argument;
+  return `'${argument.replaceAll("'", "'\\''")}'`;
+}
+
+export function formatWorktreeResumeCommand(branch: string, sessionFile: string): string {
+  return [
+    "pi",
+    "--worktree",
+    quoteShellArgument(branch),
+    "--worktree-session",
+    quoteShellArgument(sessionFile),
+  ].join(" ");
+}
+
 export function parseWorktreeCommandArguments(arguments_: string): WorktreeCommandArguments {
   const tokens = arguments_.trim() ? arguments_.trim().split(/\s+/) : [];
   let baseBranch: string | undefined;
@@ -137,7 +154,11 @@ export function createWorktreeSession(
   return sessionFile;
 }
 
-function spawnPiInWorktree(worktreePath: string, worktreeSession?: string): ChildProcess {
+function spawnPiInWorktree(
+  worktreePath: string,
+  worktreeSession?: string,
+  worktreeBranch?: string,
+): ChildProcess {
   const entrypoint = process.argv[1];
   if (!entrypoint) throw new Error("Unable to determine the Pi CLI entrypoint");
 
@@ -145,9 +166,12 @@ function spawnPiInWorktree(worktreePath: string, worktreeSession?: string): Chil
     entrypoint,
     ...removeWorktreeArguments(process.argv.slice(2), worktreeSession),
   ];
+  const environment = worktreeBranch
+    ? { ...process.env, [WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE]: worktreeBranch }
+    : process.env;
   return spawn(process.execPath, arguments_, {
     cwd: worktreePath,
-    env: process.env,
+    env: environment,
     stdio: "inherit",
   });
 }
@@ -159,13 +183,17 @@ function waitForPi(child: ChildProcess): Promise<number> {
   });
 }
 
-function runPiInWorktree(worktreePath: string, worktreeSession?: string): Promise<number> {
+function runPiInWorktree(
+  worktreePath: string,
+  worktreeSession?: string,
+  worktreeBranch?: string,
+): Promise<number> {
   // The parent's TUI leaves its rendered frame on the terminal when it shuts
   // down, and Pi's first render assumes a clean screen (it does not clear).
   // Without this, the relaunched worktree session paints below the parent's
   // leftover frame, stacking two Pi UIs on top of one another.
   if (process.stdout.isTTY) process.stdout.write("\x1b[2J\x1b[H\x1b[3J");
-  return waitForPi(spawnPiInWorktree(worktreePath, worktreeSession));
+  return waitForPi(spawnPiInWorktree(worktreePath, worktreeSession, worktreeBranch));
 }
 
 function gitFailure(arguments_: string[], result: ExecResult): Error {
@@ -177,6 +205,49 @@ async function runGit(gitRunner: GitRunner, arguments_: string[], cwd: string): 
   const result = await gitRunner(arguments_, cwd);
   if (result.code !== 0) throw gitFailure(arguments_, result);
   return result.stdout.trim();
+}
+
+async function askToRemoveWorktree(worktreePath: string): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+
+  try {
+    // The child normally restores cooked mode before exiting. Do this again in
+    // case it was interrupted before Pi could finish terminal cleanup.
+    process.stdin.setRawMode?.(false);
+    const readline = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = await readline.question(`\nRemove worktree ${worktreePath}? [y/N] `);
+      return /^(y|yes)$/i.test(answer.trim());
+    } finally {
+      readline.close();
+    }
+  } catch (error) {
+    console.error(
+      `Unable to ask whether to remove worktree ${worktreePath}; keeping it: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+}
+
+async function removeWorktreeIfRequested(
+  worktreePath: string,
+  repositoryCwd: string,
+  gitRunner: GitRunner,
+): Promise<void> {
+  if (!(await askToRemoveWorktree(worktreePath))) return;
+
+  try {
+    await runGit(gitRunner, ["worktree", "remove", worktreePath], repositoryCwd);
+    console.log(`Removed worktree: ${worktreePath}`);
+  } catch (error) {
+    console.error(
+      `Unable to remove worktree ${worktreePath}; keeping it: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 function parseWorktrees(output: string): WorktreeRecord[] {
@@ -279,6 +350,12 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
   const gitRunner: GitRunner = (arguments_, cwd) =>
     pi.exec("git", arguments_, { cwd, timeout: GIT_COMMAND_TIMEOUT_MILLISECONDS });
 
+  // The child receives this marker from spawnPiInWorktree so it can print a
+  // worktree-aware resume command during shutdown. Remove it before Pi exposes
+  // the environment to tools run inside the session.
+  let worktreeResumeBranch = process.env[WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE];
+  delete process.env[WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE];
+
   // Start Pi directly in the worktree instead of flashing the parent session
   // first. Extension flag values are only populated after all extensions load,
   // so read the CLI arguments here at factory time, before Pi's TUI paints its
@@ -287,9 +364,10 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
   const launchFlags = parseLaunchFlags(process.argv.slice(2));
   if (typeof launchFlags.branch === "string" && process.stdin.isTTY && process.stdout.isTTY) {
     try {
+      const repositoryCwd = process.cwd();
       const result = await ensureWorktree(
         launchFlags.branch,
-        process.cwd(),
+        repositoryCwd,
         gitRunner,
         launchFlags.baseBranch,
         launchFlags.worktreeSession !== undefined,
@@ -298,7 +376,11 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
       // shares the parent's foreground process group; exiting immediately
       // would orphan that group and make the child's terminal ioctls fail
       // with EIO when the shell reclaims the terminal.
-      const exitCode = await waitForPi(spawnPiInWorktree(result.path, launchFlags.worktreeSession));
+      const exitCode = await waitForPi(
+        spawnPiInWorktree(result.path, launchFlags.worktreeSession, result.branch),
+      );
+      if (exitCode === 0)
+        await removeWorktreeIfRequested(result.path, repositoryCwd, gitRunner);
       process.exit(exitCode);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -307,7 +389,7 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
     }
   }
 
-  let pendingRelaunch: { path: string; session?: string } | undefined;
+  let pendingRelaunch: { path: string; session?: string; branch: string } | undefined;
 
   const prepareWorktree = async (
     branch: string,
@@ -344,6 +426,7 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
 
     if (switchResult.cancelled)
       ctx.ui.notify(`${action} worktree, but the session switch was cancelled: ${result.path}`, "warning");
+    else worktreeResumeBranch = result.branch;
   };
 
   pi.on("session_start", async (event, ctx) => {
@@ -361,20 +444,30 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
     );
     if (ctx.mode === "tui" || ctx.mode === "rpc") {
       // Release Pi's terminal input and restore cooked mode before the child inherits the TTY.
-      pendingRelaunch = { path: result.path, session };
+      pendingRelaunch = { path: result.path, session, branch: result.branch };
       ctx.shutdown();
       return;
     }
 
-    const exitCode = await runPiInWorktree(result.path, session);
+    const exitCode = await runPiInWorktree(result.path, session, result.branch);
     process.exit(exitCode);
   });
 
-  pi.on("session_shutdown", async (event) => {
-    if (event.reason !== "quit" || !pendingRelaunch) return;
+  pi.on("session_shutdown", async (event, ctx) => {
+    if (event.reason !== "quit") return;
+
+    if (process.stdout.isTTY && worktreeResumeBranch) {
+      const sessionFile = ctx.sessionManager.getSessionFile();
+      if (sessionFile)
+        console.log(
+          `To resume this worktree session: ${formatWorktreeResumeCommand(worktreeResumeBranch, sessionFile)}`,
+        );
+    }
+
+    if (!pendingRelaunch) return;
     const relaunch = pendingRelaunch;
     pendingRelaunch = undefined;
-    await runPiInWorktree(relaunch.path, relaunch.session);
+    await runPiInWorktree(relaunch.path, relaunch.session, relaunch.branch);
   });
 
   pi.registerCommand("worktree", {
