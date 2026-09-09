@@ -10,6 +10,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import worktreeExtension, {
 	createWorktreeSession,
 	ensureWorktree,
+	parseLaunchFlags,
 	parseWorktreeCommandArguments,
 	removeWorktreeArguments,
 } from "../extensions/worktree.ts";
@@ -64,6 +65,31 @@ test("removes worktree flags before relaunching Pi", () => {
 		]),
 		["--model", "gpt-5", "prompt"],
 	);
+});
+
+test("reads the worktree launch flags from the CLI", () => {
+	assert.deepEqual(
+		parseLaunchFlags([
+			"--model",
+			"gpt-5",
+			"--worktree",
+			"feature/example",
+			"--worktree-base",
+			"main",
+			"--worktree-session",
+			"session.jsonl",
+		]),
+		{ branch: "feature/example", baseBranch: "main", worktreeSession: "session.jsonl" },
+	);
+	assert.deepEqual(
+		parseLaunchFlags(["--worktree=feature/example", "--worktree-base=main"]),
+		{ branch: "feature/example", baseBranch: "main", worktreeSession: undefined },
+	);
+	assert.deepEqual(parseLaunchFlags(["--worktree-base", "main"]), {
+		branch: undefined,
+		baseBranch: "main",
+		worktreeSession: undefined,
+	});
 });
 
 test("replaces the parent session when resuming inside a worktree", () => {
