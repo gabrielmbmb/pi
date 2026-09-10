@@ -21,7 +21,7 @@ import { createInspectorState, SubagentPanel } from "./inspector/panel.ts";
 import { cancelTargets } from "./inspector/model.ts";
 
 import { loadRoutingConfig } from "./config.ts";
-import { ROOT_AGENT_NAME } from "./constants.ts";
+import { MAX_CONCURRENT, ROOT_AGENT_NAME } from "./constants.ts";
 import {
   getSharedRegistry,
   type SubagentNode,
@@ -207,6 +207,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     uiListeners.clear();
     uiContext = ctx;
     registry.hooks = { ...registry.hooks, onStateChange, startQueued: () => engine.pump() };
+    try {
+      const loaded = loadRoutingConfig(getAgentDir(), ctx.cwd);
+      if (loaded.fileErrors.length === 0) {
+        registry.setMaxConcurrent(loaded.config?.maxConcurrent ?? MAX_CONCURRENT);
+      }
+    } catch {
+      // Spawn validation reports config errors; startup must remain unaffected.
+    }
     refreshStatus();
   });
 
@@ -288,6 +296,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const lines: string[] = ["Subagent routing config:"];
         lines.push(`  user:    ${loaded.userPath}`);
         lines.push(`  project: ${loaded.projectPath}`);
+        const maxConcurrent = loaded.config?.maxConcurrent ?? MAX_CONCURRENT;
+        lines.push(`  max concurrent: ${maxConcurrent}${loaded.config?.maxConcurrent === undefined ? " (default)" : ""}`);
         if (loaded.fileErrors.length > 0) {
           lines.push("  errors (spawns blocked):");
           for (const fileError of loaded.fileErrors) lines.push(`    ✗ ${fileError.error}`);

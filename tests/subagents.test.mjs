@@ -21,7 +21,13 @@ import {
   findTrimIndex,
   toSeedEntries,
 } from "../extensions/subagents/context.ts";
-import { MAX_CONTEXT_TURNS, MAX_MODEL_REASON_CHARS, NAME_REGEX } from "../extensions/subagents/constants.ts";
+import {
+  MAX_CONCURRENT,
+  MAX_CONCURRENT_LIMIT,
+  MAX_CONTEXT_TURNS,
+  MAX_MODEL_REASON_CHARS,
+  NAME_REGEX,
+} from "../extensions/subagents/constants.ts";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -159,6 +165,7 @@ test("config: user-only and project-only files load", async () => {
 
 test("config: merge by rule name, project overrides, defaults precedence", async () => {
   const user = {
+    maxConcurrent: 2,
     defaultModel: "a",
     defaultThinking: "low",
     rules: [
@@ -167,6 +174,7 @@ test("config: merge by rule name, project overrides, defaults precedence", async
     ],
   };
   const project = {
+    maxConcurrent: 8,
     defaultModel: "b",
     rules: [
       { name: "shared", description: "project", model: "project-model", thinking: "high" },
@@ -174,6 +182,7 @@ test("config: merge by rule name, project overrides, defaults precedence", async
     ],
   };
   const merged = mergeConfigs(user, project);
+  assert.equal(merged.maxConcurrent, 8);
   assert.equal(merged.defaultModel, "b");
   assert.equal(merged.defaultThinking, "low"); // project unset -> user wins
   assert.deepEqual(
@@ -222,6 +231,15 @@ test("config: more than MAX_RULES rules is a file-level error", () => {
   const result = parseSubagentsConfig(JSON.stringify({ rules }), "test.json");
   assert.ok(result.error);
   assert.match(result.error, /more than 20 rules/);
+});
+
+test("config: maxConcurrent validates and parses", () => {
+  assert.equal(parseSubagentsConfig(JSON.stringify({ maxConcurrent: 8 }), "test.json").config.maxConcurrent, 8);
+  assert.equal(parseSubagentsConfig(JSON.stringify({ maxConcurrent: MAX_CONCURRENT_LIMIT }), "test.json").config.maxConcurrent, MAX_CONCURRENT_LIMIT);
+  for (const value of [0, -1, 1.5, MAX_CONCURRENT_LIMIT + 1, "4"]) {
+    const result = parseSubagentsConfig(JSON.stringify({ maxConcurrent: value }), "test.json");
+    assert.match(result.error, /maxConcurrent.*integer between/);
+  }
 });
 
 test("config: over-long description and bad thinking are file-level errors", () => {
@@ -898,6 +916,19 @@ test("manager: subtreeOf collects the whole subtree preorder", () => {
     ["a1", "a2", "a2x"],
   );
   assert.deepEqual(subtreeOf(r.nodes, "b").map((n) => n.name), []);
+});
+
+test("manager: configured concurrency limit controls queueing", () => {
+  const r = reg();
+  assert.equal(r.getMaxConcurrent(), MAX_CONCURRENT);
+  r.setMaxConcurrent(1);
+  spawn(r, "first");
+  spawn(r, "second");
+  run(r, "first");
+  assert.equal(r.dequeueNext(), undefined);
+  r.settle("first", { status: "done", output: "" });
+  assert.equal(r.dequeueNext().name, "second");
+  assert.equal(r.getMaxConcurrent(), 1);
 });
 
 test("manager: queue respects MAX_CONCURRENT and spawn order", () => {

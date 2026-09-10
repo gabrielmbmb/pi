@@ -21,7 +21,12 @@ import { join } from "node:path";
 
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 
-import { isThinkingLevel, MAX_RULE_DESC_CHARS, MAX_RULES } from "./constants.ts";
+import {
+  isThinkingLevel,
+  MAX_CONCURRENT_LIMIT,
+  MAX_RULE_DESC_CHARS,
+  MAX_RULES,
+} from "./constants.ts";
 
 export interface RoutingRule {
   name: string;
@@ -31,6 +36,8 @@ export interface RoutingRule {
 }
 
 export interface SubagentsConfig {
+  /** Maximum number of subagents allowed to run at once. */
+  maxConcurrent?: number;
   defaultModel?: string;
   defaultThinking?: string;
   /** Whether cancellation/adoption/merge-timeout notes are injected into the next turn (default true, §4). */
@@ -97,6 +104,16 @@ export function parseSubagentsConfig(
     return { error: `${source}: top-level value must be a JSON object` };
   }
 
+  if (
+    raw.maxConcurrent !== undefined &&
+    (typeof raw.maxConcurrent !== "number" ||
+      !Number.isInteger(raw.maxConcurrent) ||
+      raw.maxConcurrent < 1 ||
+      raw.maxConcurrent > MAX_CONCURRENT_LIMIT)
+  ) {
+    return { error: `${source}: "maxConcurrent" must be an integer between 1 and ${MAX_CONCURRENT_LIMIT}` };
+  }
+
   if (raw.defaultModel !== undefined && !nonEmptyString(raw.defaultModel)) {
     return { error: `${source}: "defaultModel" must be a non-empty string` };
   }
@@ -151,6 +168,7 @@ export function parseSubagentsConfig(
 
   return {
     config: {
+      ...(raw.maxConcurrent !== undefined ? { maxConcurrent: raw.maxConcurrent as number } : {}),
       ...(nonEmptyString(raw.defaultModel) ? { defaultModel: raw.defaultModel } : {}),
       ...(raw.defaultThinking !== undefined ? { defaultThinking: raw.defaultThinking as string } : {}),
       ...(raw.interruptNotes !== undefined ? { interruptNotes: raw.interruptNotes as boolean } : {}),
@@ -180,11 +198,13 @@ export function mergeConfigs(
     if (!rules.some((candidate) => candidate.name === rule.name)) rules.push(rule);
   }
 
+  const maxConcurrent = project.maxConcurrent ?? user.maxConcurrent;
   const defaultModel = project.defaultModel ?? user.defaultModel;
   const defaultThinking = project.defaultThinking ?? user.defaultThinking;
   const interruptNotes = project.interruptNotes ?? user.interruptNotes;
 
   return {
+    ...(maxConcurrent !== undefined ? { maxConcurrent } : {}),
     ...(defaultModel !== undefined ? { defaultModel } : {}),
     ...(defaultThinking !== undefined ? { defaultThinking } : {}),
     ...(interruptNotes !== undefined ? { interruptNotes } : {}),

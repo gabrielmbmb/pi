@@ -54,7 +54,7 @@ The registry instance is module-scoped and **attached to `globalThis`**, so it s
 
 | Tool | Params | Behavior |
 |---|---|---|
-| `spawn_subagents` | `subagents[]` each: `{name, prompt, context: "none"\|"last_n_turns"\|"all", context_turns?, model?, thinking?, onParentError?, timeout_s?, model_reason?}` | Batch spawn; returns immediately per item: `{name, status: running\|queued, queuePosition, model, thinking}` (resolved routing outcome — lets the agent audit its own choices). Queued past `MAX_CONCURRENT`. Depth ≥ 3 → the tool is **unbound** (children at max depth can't attempt it). `executionMode: "parallel"` (spawns touch no shared files — safe for concurrent tool-call fan-out). Full validation table in §13. |
+| `spawn_subagents` | `subagents[]` each: `{name, prompt, context: "none"\|"last_n_turns"\|"all", context_turns?, model?, thinking?, onParentError?, timeout_s?, model_reason?}` | Batch spawn; returns immediately per item: `{name, status: running\|queued, queuePosition, model, thinking}` (resolved routing outcome — lets the agent audit its own choices). Queued past the configured concurrency limit. Depth ≥ 3 → the tool is **unbound** (children at max depth can't attempt it). `executionMode: "parallel"` (spawns touch no shared files — safe for concurrent tool-call fan-out). Full validation table in §13. |
 | `collect_subagents` | `names[]`, `timeout_s?` (0 = none) | **Parent-only.** Blocks until all listed finish (timeout → returns what's done, others marked `running` — does not cancel); streams ✓/⏳/✗ rows via `onUpdate`; returns payloads in **requested order**, per-item statuses (one child erroring doesn't fail the batch); combined `usage`; **removes results from the store.** |
 | `subagent_status` | `name?` (all) | **Any ancestor** + user. Non-blocking; status + 4 KB snippets. Late collection path. |
 | `cancel_subagent` | `name?` (omitted = **whole caller subtree**) | **Any ancestor** + user. **Cascades down the subtree** (recursively aborts sessions, including still-queued items); marks `cancelled`; emits one batched interrupt-note (§4, §13). |
@@ -134,6 +134,7 @@ Config, two layers (merged by rule name; project overrides):
 
 ```jsonc
 {
+  "maxConcurrent": 4,
   "defaultModel": "gpt-5.6-luna",
   "defaultThinking": "low",
   "rules": [
@@ -147,7 +148,7 @@ Config, two layers (merged by rule name; project overrides):
 }
 ```
 
-- Loaded fresh from disk on every tool call (hot reload). Validation severities: **file-level errors** (invalid JSON, duplicate rule names within a file, > `MAX_RULES`, description > `MAX_RULE_DESC_CHARS`, bad `thinking`) → hard error, spawns blocked, diagnostics via `/subagents config`; **per-rule model unresolvable** → that rule disabled + diagnostic (spawns still work); **`defaultModel` unresolvable** → warning + inherit fallback. Precedence: project > user per rule name; project `defaultModel`/`defaultThinking` win when present.
+- Loaded fresh from disk on every tool call (hot reload). `maxConcurrent` must be an integer from 1 to `MAX_CONCURRENT_LIMIT`; it controls the shared queue across the whole delegation tree, defaults to `MAX_CONCURRENT`, and project config overrides user config. Validation severities: **file-level errors** (invalid JSON, duplicate rule names within a file, > `MAX_RULES`, description > `MAX_RULE_DESC_CHARS`, bad `thinking`, invalid `maxConcurrent`) → hard error, spawns blocked, diagnostics via `/subagents config`; **per-rule model unresolvable** → that rule disabled + diagnostic (spawns still work); **`defaultModel` unresolvable** → warning + inherit fallback. Precedence: project > user per rule name; project `maxConcurrent`/`defaultModel`/`defaultThinking` win when present.
 - **Authenticated resolution:** bare IDs prefer exact `model.id` matches across `ctx.modelRegistry.getAll()`, selecting the single candidate with configured auth (`hasConfiguredAuth`). Only when no exact ID exists may a unique authenticated prefix win. Provider-qualified models without auth can reroute only to one authenticated provider with the same exact model ID, with a warning and the actual provider recorded in the spawn response and inspector Details. No available candidate or multiple authenticated alternatives → per-item preflight error before starting a worker. Available explicit providers are never replaced; model IDs are never silently changed. Configured auth is not a guarantee of token validity/quota/network access, and runtime failures are not retried across providers.
 - **The agent routes by task similarity** (per user decision): injected guidance block (bullets via `promptGuidelines` on the spawn tool; same block via `DefaultResourceLoader.appendSystemPrompt` into subagent sessions at every depth) lists `name → model/thinking` + ~60-char description snippet per rule; full descriptions live in the file (readable).
 - **Resolution chain:** explicit `model`/`thinking` params (agent chose a rule) → `defaultModel`/`defaultThinking` → inherit parent session. Cheap-by-default; expensive-on-demand. No config → inherit (feature opt-in).
@@ -175,7 +176,8 @@ The implemented inspector and controls are documented in [README.md](README.md).
 
 ```ts
 MAX_DEPTH: 3,                // root = 0; spawn blocked at depth 3 (tool unbound; error otherwise)
-MAX_CONCURRENT: 4,           // beyond → queued
+MAX_CONCURRENT: 4,           // default; beyond the configured limit → queued
+MAX_CONCURRENT_LIMIT: 64,     // maximum configured maxConcurrent value
 MERGE_TIMEOUT_S: 300,        // merge-at-settle wait before cancelling stragglers
 OUTPUT_CAP: 50_000,          // per-subagent stored output
 SNIPPET_CAP: 4_000,          // status-tool injection

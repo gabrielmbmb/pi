@@ -26,6 +26,7 @@ import { Type } from "typebox";
 
 import {
   CONTEXT_MODES,
+  MAX_CONCURRENT,
   MAX_CONTEXT_TURNS,
   MAX_DEPTH,
   MAX_NAME_LEN,
@@ -342,6 +343,10 @@ export function makeSubagentTools(
             loaded.fileErrors.map((fileError) => `- ${fileError.error}`).join("\n"),
         );
       }
+
+      // The setting is read on every spawn call, so project/user config changes
+      // take effect for queued work without interrupting running workers.
+      registry.setMaxConcurrent(loaded.config?.maxConcurrent ?? MAX_CONCURRENT);
 
       let routingBlock = "";
       try {

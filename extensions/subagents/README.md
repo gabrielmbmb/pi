@@ -62,6 +62,20 @@ Captured partial text and reported usage remain inspectable. **Stopping work doe
 
 The interactive inspector is TUI-only. RPC retains textual command notifications; model-facing status/collection tools remain available independently of the inspector.
 
+## Configuration
+
+The optional `maxConcurrent` setting is read from the same user/project config files as model routing:
+
+```jsonc
+{
+  "maxConcurrent": 8,
+  "defaultThinking": "low",
+  "rules": []
+}
+```
+
+It defaults to **4**, accepts values from **1 to 64**, and is shared across the entire delegation tree. Project config overrides user config. Additional workers are queued; changing the value never interrupts workers already running.
+
 ## Spawn validation and model routing
 
 Subagents have no turn-count limit. Turns are tracked for reporting only; explicit cancellation and the optional `timeout_s` still stop work. `/reload` also clears obsolete turn limits from running and queued workers; already-stopped workers are not restarted.

@@ -8,8 +8,10 @@
 /** Delegation tree depth limit. Root (`__main__`) is depth 0; spawning is blocked at depth 3. */
 export const MAX_DEPTH = 3;
 
-/** Concurrently running subagents allowed; spawns beyond this are queued. */
+/** Default number of concurrently running subagents; spawns beyond this are queued. */
 export const MAX_CONCURRENT = 4;
+/** Upper bound for the configurable maxConcurrent setting. */
+export const MAX_CONCURRENT_LIMIT = 64;
 
 
 /** Merge-at-settle wait before cancelling straggler children, in seconds. */

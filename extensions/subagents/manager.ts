@@ -18,6 +18,7 @@
 import {
   DEFAULT_ON_PARENT_ERROR,
   MAX_CONCURRENT,
+  MAX_CONCURRENT_LIMIT,
   MERGE_TIMEOUT_S,
   OUTPUT_CAP,
   RESULT_STORE_MAX,
@@ -365,11 +366,31 @@ export class SubagentRegistry {
   hooks: RegistryHooks;
   private readonly now: () => number;
   private readonly mergeTimeoutMs: number;
+  private concurrencyLimit = MAX_CONCURRENT;
 
   constructor(hooks: RegistryHooks = {}) {
     this.hooks = hooks;
     this.now = hooks.now ?? Date.now;
     this.mergeTimeoutMs = hooks.mergeTimeoutMs ?? MERGE_TIMEOUT_S * 1000;
+  }
+
+  /** Current configured concurrency limit. */
+  getMaxConcurrent(): number {
+    return this.concurrencyLimit;
+  }
+
+  /**
+   * Update the concurrency limit without interrupting workers already running.
+   * Raising the limit immediately pumps queued work; lowering it takes effect
+   * as slots are naturally released.
+   */
+  setMaxConcurrent(limit: number): void {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_CONCURRENT_LIMIT) {
+      throw new Error(`maxConcurrent must be an integer between 1 and ${MAX_CONCURRENT_LIMIT}`);
+    }
+    if (this.concurrencyLimit === limit) return;
+    this.concurrencyLimit = limit;
+    this.pumpQueue();
   }
 
   // ── spawn bookkeeping ────────────────────────────────────────────────────
@@ -494,7 +515,7 @@ export class SubagentRegistry {
    * session.ts attaches the live handle via `markRunning`.
    */
   dequeueNext(eligible?: ReadonlySet<string>): SubagentNode | undefined {
-    if (this.runningCount() >= MAX_CONCURRENT) return undefined;
+    if (this.runningCount() >= this.concurrencyLimit) return undefined;
     const next = [...this.nodes.values()]
       .filter((node) => node.status === "queued" && (!eligible || eligible.has(node.name)))
       .sort((a, b) => a.spawnIndex - b.spawnIndex)[0];
@@ -851,6 +872,7 @@ export class SubagentRegistry {
     this.nodes.clear();
     this.store.clear();
     this.nextSpawnIndex = 0;
+    this.concurrencyLimit = MAX_CONCURRENT;
   }
 }
 
@@ -882,6 +904,10 @@ export function getSharedRegistry(hooks: RegistryHooks = {}): SubagentRegistry {
     // TS private fields (not JS #fields), so the existing instance is compatible.
     Object.setPrototypeOf(existing, SubagentRegistry.prototype);
     const registry = existing as SubagentRegistry;
+    // Migrate registries created before configurable concurrency existed.
+    if (!Number.isInteger(Reflect.get(registry, "concurrencyLimit"))) {
+      Reflect.set(registry, "concurrencyLimit", MAX_CONCURRENT);
+    }
     Object.setPrototypeOf(registry.store, ResultStore.prototype);
     // Old watchers read the node field on each turn. Removing it also disables
     // their future turn-limit aborts without interrupting running workers.
