@@ -9,6 +9,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 const WORKTREE_DIRECTORY = ".agents/worktrees";
 const WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE = "PI_WORKTREE_RESUME_BRANCH";
@@ -406,6 +407,14 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
     }
   };
 
+  const queueWorktreeSwitch = (branch: string, baseBranch?: string): void => {
+    const baseArgument = baseBranch ? ` --base ${baseBranch}` : "";
+    pi.sendUserMessage(`/worktree ${branch}${baseArgument}`, {
+      deliverAs: "followUp",
+      expandPromptTemplates: true,
+    });
+  };
+
   const switchToWorktree = async (
     branch: string,
     ctx: ExtensionCommandContext,
@@ -481,6 +490,36 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
         return;
       }
       await switchToWorktree(parsedArguments.branch, ctx, parsedArguments.baseBranch);
+    },
+  });
+
+  pi.registerTool({
+    name: "worktree_switch",
+    label: "Switch worktree",
+    description: "Create or reuse a Git worktree and switch Pi into it.",
+    promptSnippet: "Create or switch Pi into a Git worktree",
+    promptGuidelines: [
+      "Use worktree_switch instead of running git worktree add when work should continue in a separate worktree.",
+      "After calling worktree_switch, do not run more tools in the original working directory.",
+    ],
+    parameters: Type.Object({
+      branch: Type.String({ description: "The worktree branch name" }),
+      baseBranch: Type.Optional(Type.String({ description: "The branch to create the worktree from" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const result = await prepareWorktree(params.branch, ctx, params.baseBranch);
+      queueWorktreeSwitch(params.branch, params.baseBranch);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Queued a switch to worktree ${result.path}. Pi will continue in that worktree after this turn.`,
+          },
+        ],
+        details: result,
+        terminate: true,
+      };
     },
   });
 }

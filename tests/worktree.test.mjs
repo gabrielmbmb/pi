@@ -234,6 +234,7 @@ test("the CLI flag shuts down the parent TUI before relaunching", async (context
 		},
 		registerCommand() {},
 		registerFlag() {},
+		registerTool() {},
 	});
 	assert.ok(sessionStartHandler);
 
@@ -277,6 +278,7 @@ test("the slash command switches Pi to a session in the worktree", async (contex
 			if (name === "worktree") worktreeCommand = command;
 		},
 		registerFlag() {},
+		registerTool() {},
 	});
 	assert.ok(worktreeCommand);
 
@@ -307,6 +309,54 @@ test("the slash command switches Pi to a session in the worktree", async (contex
 		type: "info",
 	});
 	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], switchedCwd), baseCommit);
+});
+
+test("the worktree tool prepares and queues a session switch", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const sentMessages = [];
+	let worktreeTool;
+
+	worktreeExtension({
+		exec(command, arguments_, options) {
+			assert.equal(command, "git");
+			return runGit(arguments_, options.cwd);
+		},
+		on() {},
+		registerCommand() {},
+		registerFlag() {},
+		registerTool(tool) {
+			if (tool.name === "worktree_switch") worktreeTool = tool;
+		},
+		sendUserMessage(content, options) {
+			sentMessages.push({ content, options });
+		},
+	});
+	assert.ok(worktreeTool);
+
+	const result = await worktreeTool.execute(
+		"tool-call",
+		{ branch: "tool-worktree", baseBranch: "main" },
+		undefined,
+		undefined,
+		{ cwd: repositoryRoot, ui: { notify() {} } },
+	);
+
+	assert.equal(result.terminate, true);
+	assert.equal(
+		result.content[0].text,
+		`Queued a switch to worktree ${repositoryRoot}/.agents/worktrees/tool-worktree. Pi will continue in that worktree after this turn.`,
+	);
+	assert.deepEqual(sentMessages, [
+		{
+			content: "/worktree tool-worktree --base main",
+			options: { deliverAs: "followUp", expandPromptTemplates: true },
+		},
+	]);
+	assert.equal(
+		await runGitSuccessfully(["branch", "--show-current"], `${repositoryRoot}/.agents/worktrees/tool-worktree`),
+		"tool-worktree",
+	);
 });
 
 test("reuses the requested worktree idempotently", async (context) => {
