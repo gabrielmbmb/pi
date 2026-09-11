@@ -25,6 +25,7 @@ interface WorktreeRecord {
 interface WorktreeCommandArguments {
   baseBranch?: string;
   branch: string;
+  continueAgent?: boolean;
 }
 
 export interface WorktreeResult {
@@ -108,6 +109,7 @@ export function parseWorktreeCommandArguments(arguments_: string): WorktreeComma
   const tokens = arguments_.trim() ? arguments_.trim().split(/\s+/) : [];
   let baseBranch: string | undefined;
   let branch: string | undefined;
+  let continueAgent = false;
 
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
@@ -124,13 +126,19 @@ export function parseWorktreeCommandArguments(arguments_: string): WorktreeComma
       baseBranch = value;
       continue;
     }
+    // Internal option used by worktree_switch to resume the agent in the replacement session.
+    if (token === "--continue") {
+      if (continueAgent) throw new Error("Usage: /worktree <name> [--base <branch>]");
+      continueAgent = true;
+      continue;
+    }
     if (token.startsWith("-") || branch)
       throw new Error("Usage: /worktree <name> [--base <branch>]");
     branch = token;
   }
 
   if (!branch) throw new Error("Usage: /worktree <name> [--base <branch>]");
-  return { baseBranch, branch };
+  return { baseBranch, branch, ...(continueAgent ? { continueAgent: true } : {}) };
 }
 
 export function createWorktreeSession(
@@ -391,6 +399,9 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
   }
 
   let pendingRelaunch: { path: string; session?: string; branch: string } | undefined;
+  let pendingWorktreeSwitch: WorktreeCommandArguments | undefined;
+  let completePendingWorktreeSwitch: (() => void) | undefined;
+  let pendingWorktreeSwitchCommandStarted = false;
 
   const prepareWorktree = async (
     branch: string,
@@ -408,17 +419,17 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
   };
 
   const queueWorktreeSwitch = (branch: string, baseBranch?: string): void => {
-    const baseArgument = baseBranch ? ` --base ${baseBranch}` : "";
-    pi.sendUserMessage(`/worktree ${branch}${baseArgument}`, {
-      deliverAs: "followUp",
-      expandPromptTemplates: true,
-    });
+    // Do not dispatch /worktree while the tool is running. With command expansion enabled,
+    // pi.sendUserMessage executes the command immediately instead of queueing it, which can
+    // copy the source session before this tool result has been persisted.
+    pendingWorktreeSwitch = { branch, baseBranch, continueAgent: true };
   };
 
   const switchToWorktree = async (
     branch: string,
     ctx: ExtensionCommandContext,
     baseBranch?: string,
+    continueAgent = false,
   ): Promise<void> => {
     const result = await prepareWorktree(branch, ctx, baseBranch);
     const sourceSessionFile = ctx.sessionManager.getSessionFile();
@@ -430,6 +441,8 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
         setTimeout(() => {
           replacementContext.ui.notify(`${action} worktree: ${result.path}`, "info");
         }, 0);
+        if (continueAgent)
+          await replacementContext.sendUserMessage("Continue working on the task in this worktree.");
       },
     });
 
@@ -437,6 +450,29 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`${action} worktree, but the session switch was cancelled: ${result.path}`, "warning");
     else worktreeResumeBranch = result.branch;
   };
+
+  pi.on("agent_settled", async () => {
+    const pending = pendingWorktreeSwitch;
+    if (!pending) return;
+    pendingWorktreeSwitch = undefined;
+
+    // Keep the original run alive until the replacement session has started its
+    // continuation. This is important for print/RPC callers, which may dispose the
+    // runtime as soon as the original prompt settles.
+    const completion = new Promise<void>((resolve) => {
+      completePendingWorktreeSwitch = resolve;
+    });
+    pendingWorktreeSwitchCommandStarted = false;
+    const baseArgument = pending.baseBranch ? ` --base ${pending.baseBranch}` : "";
+    pi.sendUserMessage(`/worktree ${pending.branch}${baseArgument} --continue`, {
+      expandPromptTemplates: true,
+    });
+    // The public sendUserMessage API is fire-and-forget. In the real runtime the
+    // command handler starts synchronously; the guard also keeps lightweight test
+    // hosts that only record messages from leaving this hook waiting forever.
+    if (pendingWorktreeSwitchCommandStarted) await completion;
+    else completePendingWorktreeSwitch = undefined;
+  });
 
   pi.on("session_start", async (event, ctx) => {
     const branch = pi.getFlag("worktree");
@@ -489,7 +525,21 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
         return;
       }
-      await switchToWorktree(parsedArguments.branch, ctx, parsedArguments.baseBranch);
+      const complete = parsedArguments.continueAgent ? completePendingWorktreeSwitch : undefined;
+      if (complete) {
+        completePendingWorktreeSwitch = undefined;
+        pendingWorktreeSwitchCommandStarted = true;
+      }
+      try {
+        await switchToWorktree(
+          parsedArguments.branch,
+          ctx,
+          parsedArguments.baseBranch,
+          parsedArguments.continueAgent,
+        );
+      } finally {
+        complete?.();
+      }
     },
   });
 

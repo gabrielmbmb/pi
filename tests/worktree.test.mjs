@@ -128,6 +128,14 @@ test("parses a base branch option for the slash command", () => {
 	});
 });
 
+test("parses the internal continuation option for the slash command", () => {
+	assert.deepEqual(parseWorktreeCommandArguments("feature/example --continue"), {
+		baseBranch: undefined,
+		branch: "feature/example",
+		continueAgent: true,
+	});
+});
+
 test("creates a branch and nested worktree from the current branch", async (context) => {
 	const repositoryRoot = await createRepository();
 	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
@@ -311,11 +319,13 @@ test("the slash command switches Pi to a session in the worktree", async (contex
 	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], switchedCwd), baseCommit);
 });
 
-test("the worktree tool prepares and queues a session switch", async (context) => {
+test("the slash command can continue the agent after switching sessions", async (context) => {
 	const repositoryRoot = await createRepository();
 	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
-	const sentMessages = [];
-	let worktreeTool;
+	await runGitSuccessfully(["switch", "-c", "current-branch"], repositoryRoot);
+	const sourceSession = SessionManager.create(repositoryRoot, join(repositoryRoot, ".sessions"));
+	let worktreeCommand;
+	let kickoffMessage;
 
 	worktreeExtension({
 		exec(command, arguments_, options) {
@@ -323,16 +333,84 @@ test("the worktree tool prepares and queues a session switch", async (context) =
 			return runGit(arguments_, options.cwd);
 		},
 		on() {},
-		registerCommand() {},
+		registerCommand(name, command) {
+			if (name === "worktree") worktreeCommand = command;
+		},
+		registerFlag() {},
+		registerTool() {},
+	});
+	assert.ok(worktreeCommand);
+
+	let targetSessionDirectory;
+	await worktreeCommand.handler("continued-worktree --continue", {
+		cwd: repositoryRoot,
+		sessionManager: sourceSession,
+		switchSession: async (sessionFile, options) => {
+			targetSessionDirectory = dirname(sessionFile);
+			await options.withSession({
+				ui: { notify() {} },
+				sendUserMessage: async (message) => {
+					kickoffMessage = message;
+				},
+			});
+			return { cancelled: false };
+		},
+		ui: { notify() {} },
+	});
+	context.after(() => rm(targetSessionDirectory, { force: true, recursive: true }));
+
+	assert.equal(kickoffMessage, "Continue working on the task in this worktree.");
+});
+
+test("the worktree tool queues a session switch until the agent settles", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const sentMessages = [];
+	let agentSettledHandler;
+	let kickoffMessage;
+	let targetSessionDirectory;
+	let worktreeCommand;
+	let worktreeTool;
+	const sourceSession = SessionManager.create(repositoryRoot, join(repositoryRoot, ".sessions", "source"));
+	const commandContext = {
+		cwd: repositoryRoot,
+		sessionManager: sourceSession,
+		switchSession: async (sessionFile, options) => {
+			targetSessionDirectory = dirname(sessionFile);
+			await options.withSession({
+				ui: { notify() {} },
+				sendUserMessage: async (message) => {
+					kickoffMessage = message;
+				},
+			});
+			return { cancelled: false };
+		},
+		ui: { notify() {} },
+	};
+
+	worktreeExtension({
+		exec(command, arguments_, options) {
+			assert.equal(command, "git");
+			return runGit(arguments_, options.cwd);
+		},
+		on(event, handler) {
+			if (event === "agent_settled") agentSettledHandler = handler;
+		},
+		registerCommand(name, command) {
+			if (name === "worktree") worktreeCommand = command;
+		},
 		registerFlag() {},
 		registerTool(tool) {
 			if (tool.name === "worktree_switch") worktreeTool = tool;
 		},
 		sendUserMessage(content, options) {
 			sentMessages.push({ content, options });
+			return worktreeCommand.handler(content.slice("/worktree ".length), commandContext);
 		},
 	});
+	assert.ok(worktreeCommand);
 	assert.ok(worktreeTool);
+	assert.ok(agentSettledHandler);
 
 	const result = await worktreeTool.execute(
 		"tool-call",
@@ -347,12 +425,17 @@ test("the worktree tool prepares and queues a session switch", async (context) =
 		result.content[0].text,
 		`Queued a switch to worktree ${repositoryRoot}/.agents/worktrees/tool-worktree. Pi will continue in that worktree after this turn.`,
 	);
+	assert.deepEqual(sentMessages, []);
+
+	await agentSettledHandler();
 	assert.deepEqual(sentMessages, [
 		{
-			content: "/worktree tool-worktree --base main",
-			options: { deliverAs: "followUp", expandPromptTemplates: true },
+			content: "/worktree tool-worktree --base main --continue",
+			options: { expandPromptTemplates: true },
 		},
 	]);
+	assert.equal(kickoffMessage, "Continue working on the task in this worktree.");
+	context.after(() => rm(targetSessionDirectory, { force: true, recursive: true }));
 	assert.equal(
 		await runGitSuccessfully(["branch", "--show-current"], `${repositoryRoot}/.agents/worktrees/tool-worktree`),
 		"tool-worktree",
