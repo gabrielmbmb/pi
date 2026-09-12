@@ -311,20 +311,20 @@ export async function ensureWorktree(
   const repositoryRoot = worktrees[0]?.path;
   if (!repositoryRoot) throw new Error("Git returned no worktrees");
   const targetPath = `${repositoryRoot}/${WORKTREE_DIRECTORY}/${branch}`;
-  const targetWorktree = worktrees.find((worktree) => worktree.path === targetPath);
+  // Stacked branches can share a checkout whose directory keeps the original branch name.
+  const targetWorktree =
+    worktrees.find((worktree) => worktree.branch === branch) ??
+    worktrees.find((worktree) => worktree.path === targetPath);
 
   if (targetWorktree) {
-    if (!existsSync(targetPath))
-      throw new Error(`Worktree ${targetPath} is registered with Git but its directory does not exist`);
+    if (!existsSync(targetWorktree.path))
+      throw new Error(`Worktree ${targetWorktree.path} is registered with Git but its directory does not exist`);
     if (targetWorktree.branch !== branch && !allowBranchMismatch)
       throw new Error(
-        `Worktree path ${targetPath} is already checked out on branch ${targetWorktree.branch ?? "detached HEAD"}`,
+        `Worktree path ${targetWorktree.path} is already checked out on branch ${targetWorktree.branch ?? "detached HEAD"}`,
       );
-    return { branch, created: false, path: targetPath };
+    return { branch, created: false, path: targetWorktree.path };
   }
-
-  const branchWorktree = worktrees.find((worktree) => worktree.branch === branch);
-  if (branchWorktree) throw new Error(`Branch ${branch} is already checked out at ${branchWorktree.path}`);
 
   const branchExists = await localBranchExists(gitRunner, branch, repositoryRoot);
   if (branchExists) await runGit(gitRunner, ["worktree", "add", targetPath, branch], repositoryRoot);
@@ -553,7 +553,7 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
       "After calling worktree_switch, do not run more tools in the original working directory.",
     ],
     parameters: Type.Object({
-      branch: Type.String({ description: "The worktree branch name" }),
+      branch: Type.String({ description: "The Git branch name; reuses its existing checkout even if the directory has a different name" }),
       baseBranch: Type.Optional(Type.String({ description: "The branch to create the worktree from" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

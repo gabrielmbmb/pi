@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -362,10 +362,14 @@ test("the slash command can continue the agent after switching sessions", async 
 	assert.equal(kickoffMessage, "Continue working on the task in this worktree.");
 });
 
-test("the worktree tool queues a session switch until the agent settles", async (context) => {
+async function assertWorktreeToolSwitch(context, reuseExisting) {
 	const repositoryRoot = await createRepository();
 	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const targetPath = join(repositoryRoot, ".agents/worktrees", reuseExisting ? "original-branch" : "tool-worktree");
+	if (reuseExisting)
+		await runGitSuccessfully(["worktree", "add", "-b", "tool-worktree", targetPath, "main"], repositoryRoot);
 	const sentMessages = [];
+	let switchedCwd;
 	let agentSettledHandler;
 	let kickoffMessage;
 	let targetSessionDirectory;
@@ -376,6 +380,7 @@ test("the worktree tool queues a session switch until the agent settles", async 
 		cwd: repositoryRoot,
 		sessionManager: sourceSession,
 		switchSession: async (sessionFile, options) => {
+			switchedCwd = SessionManager.open(sessionFile).getCwd();
 			targetSessionDirectory = dirname(sessionFile);
 			await options.withSession({
 				ui: { notify() {} },
@@ -423,7 +428,7 @@ test("the worktree tool queues a session switch until the agent settles", async 
 	assert.equal(result.terminate, true);
 	assert.equal(
 		result.content[0].text,
-		`Queued a switch to worktree ${repositoryRoot}/.agents/worktrees/tool-worktree. Pi will continue in that worktree after this turn.`,
+		`Queued a switch to worktree ${targetPath}. Pi will continue in that worktree after this turn.`,
 	);
 	assert.deepEqual(sentMessages, []);
 
@@ -436,11 +441,17 @@ test("the worktree tool queues a session switch until the agent settles", async 
 	]);
 	assert.equal(kickoffMessage, "Continue working on the task in this worktree.");
 	context.after(() => rm(targetSessionDirectory, { force: true, recursive: true }));
-	assert.equal(
-		await runGitSuccessfully(["branch", "--show-current"], `${repositoryRoot}/.agents/worktrees/tool-worktree`),
-		"tool-worktree",
-	);
-});
+	assert.equal(switchedCwd, targetPath);
+	assert.deepEqual(result.details, { branch: "tool-worktree", created: !reuseExisting, path: targetPath });
+	assert.equal(await runGitSuccessfully(["branch", "--show-current"], targetPath), "tool-worktree");
+}
+
+for (const reuseExisting of [false, true]) {
+	const worktreeKind = reuseExisting ? "differently named existing" : "new";
+	test(`the worktree tool queues a ${worktreeKind} worktree switch until the agent settles`, async (context) => {
+		await assertWorktreeToolSwitch(context, reuseExisting);
+	});
+}
 
 test("reuses the requested worktree idempotently", async (context) => {
 	const repositoryRoot = await createRepository();
@@ -451,6 +462,73 @@ test("reuses the requested worktree idempotently", async (context) => {
 
 	assert.equal(result.created, false);
 	assert.equal(result.path, `${repositoryRoot}/.agents/worktrees/existing-worktree`);
+});
+
+test("reuses a dirty worktree after switching to a stacked branch without moving it", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const original = await ensureWorktree("stack-base", repositoryRoot, runGit);
+	await runGitSuccessfully(["switch", "-c", "stack-top"], original.path);
+	const stagedPath = join(original.path, "staged.txt");
+	const untrackedPath = join(original.path, "untracked.txt");
+	await writeFile(stagedPath, "staged work\n");
+	await runGitSuccessfully(["add", "staged.txt"], original.path);
+	await writeFile(stagedPath, "unstaged work\n");
+	await writeFile(untrackedPath, "untracked work\n");
+	const beforeStatus = await runGitSuccessfully(["status", "--porcelain"], original.path);
+	const beforeWorktrees = await runGitSuccessfully(["worktree", "list", "--porcelain"], repositoryRoot);
+	const beforeCommit = await runGitSuccessfully(["rev-parse", "HEAD"], original.path);
+
+	const result = await ensureWorktree("stack-top", repositoryRoot, runGit);
+
+	assert.deepEqual(result, { branch: "stack-top", created: false, path: original.path });
+	assert.equal(await runGitSuccessfully(["status", "--porcelain"], original.path), beforeStatus);
+	assert.equal(await runGitSuccessfully(["worktree", "list", "--porcelain"], repositoryRoot), beforeWorktrees);
+	assert.equal(await runGitSuccessfully(["rev-parse", "HEAD"], original.path), beforeCommit);
+	assert.equal(await runGitSuccessfully(["show", ":staged.txt"], original.path), "staged work");
+	assert.equal(await readFile(stagedPath, "utf8"), "unstaged work\n");
+	assert.equal(await readFile(untrackedPath, "utf8"), "untracked work\n");
+});
+
+test("prefers the checked-out branch over an occupied conventional path", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const branchPath = join(repositoryRoot, "custom worktrees", "actual checkout");
+	const conventionalPath = join(repositoryRoot, ".agents/worktrees/requested-branch");
+	await runGitSuccessfully(["worktree", "add", "-b", "requested-branch", branchPath, "main"], repositoryRoot);
+	await runGitSuccessfully(["worktree", "add", "-b", "other-branch", conventionalPath, "main"], repositoryRoot);
+
+	const result = await ensureWorktree("requested-branch", conventionalPath, runGit);
+
+	assert.deepEqual(result, { branch: "requested-branch", created: false, path: branchPath });
+	assert.equal(await runGitSuccessfully(["branch", "--show-current"], conventionalPath), "other-branch");
+});
+
+test("can return to the main checkout and reuse the current checkout", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const worktree = await ensureWorktree("feature", repositoryRoot, runGit);
+
+	assert.deepEqual(await ensureWorktree("main", worktree.path, runGit), {
+		branch: "main", created: false, path: repositoryRoot,
+	});
+	assert.deepEqual(await ensureWorktree("main", repositoryRoot, runGit), {
+		branch: "main", created: false, path: repositoryRoot,
+	});
+});
+
+test("rejects a locked worktree with a missing directory", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const targetPath = join(repositoryRoot, "custom-checkout");
+	await runGitSuccessfully(["worktree", "add", "-b", "missing", targetPath, "main"], repositoryRoot);
+	await runGitSuccessfully(["worktree", "lock", targetPath], repositoryRoot);
+	await rm(targetPath, { force: true, recursive: true });
+
+	await assert.rejects(
+		ensureWorktree("missing", repositoryRoot, runGit),
+		/registered with Git but its directory does not exist/,
+	);
 });
 
 test("recreates a worktree whose directory was deleted", async (context) => {
