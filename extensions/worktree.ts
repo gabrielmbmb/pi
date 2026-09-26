@@ -13,6 +13,7 @@ import { Type } from "typebox";
 
 const WORKTREE_DIRECTORY = ".agents/worktrees";
 const WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE = "PI_WORKTREE_RESUME_BRANCH";
+const WORKTREE_RECLAIM_ENVIRONMENT_VARIABLE = "PI_WORKTREE_RECLAIM";
 const GIT_COMMAND_TIMEOUT_MILLISECONDS = 30_000;
 
 type GitRunner = (arguments_: string[], cwd: string) => Promise<ExecResult>;
@@ -20,6 +21,15 @@ type GitRunner = (arguments_: string[], cwd: string) => Promise<ExecResult>;
 interface WorktreeRecord {
   path: string;
   branch?: string;
+}
+
+interface WorktreeReclaim {
+  path: string;
+  repositoryCwd: string;
+}
+
+export interface WorktreeExtensionOptions {
+  confirmRemoveWorktree?: (worktreePath: string) => Promise<boolean>;
 }
 
 interface WorktreeCommandArguments {
@@ -240,12 +250,37 @@ async function askToRemoveWorktree(worktreePath: string): Promise<boolean> {
   }
 }
 
-async function removeWorktreeIfRequested(
+function readWorktreeReclaim(): WorktreeReclaim | undefined {
+  const value = process.env[WORKTREE_RECLAIM_ENVIRONMENT_VARIABLE];
+  delete process.env[WORKTREE_RECLAIM_ENVIRONMENT_VARIABLE];
+  if (!value) return undefined;
+
+  try {
+    const parsed = JSON.parse(value) as Partial<WorktreeReclaim> | null;
+    if (typeof parsed?.path === "string" && typeof parsed.repositoryCwd === "string")
+      return { path: parsed.path, repositoryCwd: parsed.repositoryCwd };
+  } catch {
+    // Ignore a malformed marker and leave the worktree in place.
+  }
+
+  return undefined;
+}
+
+function isLinkedWorktree(worktreePath: string): boolean {
+  try {
+    return statSync(`${worktreePath}/.git`).isFile();
+  } catch {
+    return false;
+  }
+}
+
+export async function removeWorktreeIfRequested(
   worktreePath: string,
   repositoryCwd: string,
   gitRunner: GitRunner,
+  confirm: (worktreePath: string) => Promise<boolean> = askToRemoveWorktree,
 ): Promise<void> {
-  if (!(await askToRemoveWorktree(worktreePath))) return;
+  if (!(await confirm(worktreePath))) return;
 
   try {
     await runGit(gitRunner, ["worktree", "remove", worktreePath], repositoryCwd);
@@ -342,7 +377,10 @@ export async function ensureWorktree(
   return { branch, created: true, path: targetPath };
 }
 
-export default async function worktreeExtension(pi: ExtensionAPI) {
+export default async function worktreeExtension(
+  pi: ExtensionAPI,
+  options: WorktreeExtensionOptions = {},
+) {
   pi.registerFlag("worktree", {
     description: "Start Pi in a Git worktree",
     type: "string",
@@ -358,12 +396,18 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
 
   const gitRunner: GitRunner = (arguments_, cwd) =>
     pi.exec("git", arguments_, { cwd, timeout: GIT_COMMAND_TIMEOUT_MILLISECONDS });
+  const confirmRemoveWorktree = options.confirmRemoveWorktree ?? askToRemoveWorktree;
 
   // The child receives this marker from spawnPiInWorktree so it can print a
   // worktree-aware resume command during shutdown. Remove it before Pi exposes
   // the environment to tools run inside the session.
   let worktreeResumeBranch = process.env[WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE];
   delete process.env[WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE];
+  // switchSession replaces this extension runtime, so an in-process worktree
+  // switch leaves the worktree to reclaim in the environment for the reloaded
+  // instance. spawnPiInWorktree never sets it, so only the bootstrap parent
+  // offers to remove a launch worktree.
+  let worktreeReclaim = readWorktreeReclaim();
 
   // Start Pi directly in the worktree instead of flashing the parent session
   // first. Extension flag values are only populated after all extensions load,
@@ -388,8 +432,8 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
       const exitCode = await waitForPi(
         spawnPiInWorktree(result.path, launchFlags.worktreeSession, result.branch),
       );
-      if (exitCode === 0)
-        await removeWorktreeIfRequested(result.path, repositoryCwd, gitRunner);
+      if (exitCode === 0 && isLinkedWorktree(result.path))
+        await removeWorktreeIfRequested(result.path, repositoryCwd, gitRunner, confirmRemoveWorktree);
       process.exit(exitCode);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -435,6 +479,16 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
     const sourceSessionFile = ctx.sessionManager.getSessionFile();
     const targetSessionFile = createWorktreeSession(result.path, sourceSessionFile);
     const action = result.created ? "Created" : "Using existing";
+    // switchSession tears down this extension instance and reloads it for the
+    // replacement session, so hand the worktree session state to the reloaded
+    // instance through the environment.
+    const reclaimsWorktree = isLinkedWorktree(result.path);
+    if (reclaimsWorktree) {
+      process.env[WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE] = result.branch;
+      const reclaim: WorktreeReclaim = { path: result.path, repositoryCwd: ctx.cwd };
+      process.env[WORKTREE_RECLAIM_ENVIRONMENT_VARIABLE] = JSON.stringify(reclaim);
+    }
+
     const switchResult = await ctx.switchSession(targetSessionFile, {
       withSession: async (replacementContext) => {
         // Pi reports every switchSession call as "Resumed session" after this callback returns.
@@ -444,11 +498,17 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
         if (continueAgent)
           await replacementContext.sendUserMessage("Continue working on the task in this worktree.");
       },
+    }).finally(() => {
+      // The reloaded instance consumes these markers as it loads. Clear them here
+      // so a cancelled or failed switch does not leak worktree state.
+      if (reclaimsWorktree) {
+        delete process.env[WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE];
+        delete process.env[WORKTREE_RECLAIM_ENVIRONMENT_VARIABLE];
+      }
     });
 
     if (switchResult.cancelled)
       ctx.ui.notify(`${action} worktree, but the session switch was cancelled: ${result.path}`, "warning");
-    else worktreeResumeBranch = result.branch;
   };
 
   pi.on("agent_settled", async () => {
@@ -499,7 +559,19 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
-    if (event.reason !== "quit") return;
+    if (event.reason !== "quit") {
+      // /new, /fork, and /reload keep the current working directory, so pass the
+      // worktree session state to the extension instance replacing this one.
+      if (
+        worktreeReclaim &&
+        (event.reason === "new" || event.reason === "fork" || event.reason === "reload")
+      ) {
+        if (worktreeResumeBranch)
+          process.env[WORKTREE_RESUME_BRANCH_ENVIRONMENT_VARIABLE] = worktreeResumeBranch;
+        process.env[WORKTREE_RECLAIM_ENVIRONMENT_VARIABLE] = JSON.stringify(worktreeReclaim);
+      }
+      return;
+    }
 
     if (process.stdout.isTTY && worktreeResumeBranch) {
       const sessionFile = ctx.sessionManager.getSessionFile();
@@ -509,10 +581,20 @@ export default async function worktreeExtension(pi: ExtensionAPI) {
         );
     }
 
-    if (!pendingRelaunch) return;
-    const relaunch = pendingRelaunch;
-    pendingRelaunch = undefined;
-    await runPiInWorktree(relaunch.path, relaunch.session, relaunch.branch);
+    const reclaim = worktreeReclaim;
+    worktreeReclaim = undefined;
+
+    if (pendingRelaunch) {
+      const relaunch = pendingRelaunch;
+      pendingRelaunch = undefined;
+      const exitCode = await runPiInWorktree(relaunch.path, relaunch.session, relaunch.branch);
+      if (exitCode === 0 && isLinkedWorktree(relaunch.path))
+        await removeWorktreeIfRequested(relaunch.path, ctx.cwd, gitRunner, confirmRemoveWorktree);
+      return;
+    }
+
+    if (reclaim)
+      await removeWorktreeIfRequested(reclaim.path, reclaim.repositoryCwd, gitRunner, confirmRemoveWorktree);
   });
 
   pi.registerCommand("worktree", {

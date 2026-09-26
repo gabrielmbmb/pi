@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -14,6 +15,7 @@ import worktreeExtension, {
 	parseLaunchFlags,
 	parseWorktreeCommandArguments,
 	removeWorktreeArguments,
+	removeWorktreeIfRequested,
 } from "../extensions/worktree.ts";
 
 function runGit(arguments_, cwd) {
@@ -47,6 +49,86 @@ async function createRepository() {
 	await runGitSuccessfully(["-c", "user.name=Pi", "-c", "user.email=pi@example.com", "commit", "--allow-empty", "-m", "Initial commit"], repositoryRoot);
 	return runGitSuccessfully(["rev-parse", "--show-toplevel"], repositoryRoot);
 }
+
+test("removes a worktree only when the user confirms", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const kept = await ensureWorktree("kept-worktree", repositoryRoot, runGit);
+	const removed = await ensureWorktree("removed-worktree", repositoryRoot, runGit);
+
+	await removeWorktreeIfRequested(kept.path, repositoryRoot, runGit, async () => false);
+	await removeWorktreeIfRequested(removed.path, repositoryRoot, runGit, async () => true);
+
+	assert.equal(existsSync(kept.path), true);
+	assert.equal(existsSync(removed.path), false);
+});
+
+test("offers to remove the worktree when a session switched with the command quits", async (context) => {
+	const repositoryRoot = await createRepository();
+	context.after(() => rm(repositoryRoot, { force: true, recursive: true }));
+	const targetPath = join(repositoryRoot, ".agents/worktrees", "cleanup-worktree");
+	const sourceSession = SessionManager.create(repositoryRoot, join(repositoryRoot, ".sessions", "source"));
+	const notifications = [];
+	let worktreeCommand;
+
+	const createPi = (onShutdown) => ({
+		exec(command, arguments_, options) {
+			assert.equal(command, "git");
+			return runGit(arguments_, options.cwd);
+		},
+		on(event, handler) {
+			if (event === "session_shutdown" && onShutdown) onShutdown(handler);
+		},
+		registerCommand(name, command) {
+			if (name === "worktree") worktreeCommand = command;
+		},
+		registerFlag() {},
+		registerTool() {},
+	});
+
+	worktreeExtension(createPi());
+	assert.ok(worktreeCommand);
+
+	let shutdownHandler;
+	let targetSessionFile;
+	let targetSessionDirectory;
+	let promptedPath;
+	await worktreeCommand.handler("cleanup-worktree", {
+		cwd: repositoryRoot,
+		sessionManager: sourceSession,
+		switchSession: async (sessionFile, options) => {
+			targetSessionFile = sessionFile;
+			targetSessionDirectory = dirname(sessionFile);
+			// Pi reloads and rebinds extensions for the replacement session before
+			// withSession runs, and that instance reads the worktree context left in
+			// the environment by switchToWorktree.
+			worktreeExtension(createPi((handler) => {
+				shutdownHandler = handler;
+			}), {
+				confirmRemoveWorktree: async (worktreePath) => {
+					promptedPath = worktreePath;
+					return true;
+				},
+			});
+			await options.withSession({
+				ui: { notify: (message, type) => notifications.push({ message, type }) },
+				sendUserMessage: async () => {},
+			});
+			return { cancelled: false };
+		},
+		ui: { notify: (message, type) => notifications.push({ message, type }) },
+	});
+	context.after(() => rm(targetSessionDirectory, { force: true, recursive: true }));
+
+	assert.ok(shutdownHandler);
+	await shutdownHandler(
+		{ reason: "quit" },
+		{ cwd: targetPath, sessionManager: { getSessionFile: () => targetSessionFile } },
+	);
+
+	assert.equal(promptedPath, targetPath);
+	assert.equal(existsSync(targetPath), false);
+});
 
 test("removes worktree flags before relaunching Pi", () => {
 	assert.deepEqual(
