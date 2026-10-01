@@ -18,16 +18,17 @@
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.85.1",
     "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@earendil-works/pi-tui": "^0.85.1"
+    "@earendil-works/pi-tui": "^0.85.1",
+    "typebox": "1.1.38"
   },
   "packageManager": "pnpm@11.0.8",
   "dependencies": {
-    "pi-vim": "0.14.1",
-    "typebox": "1.1.38"
+    "pi-vim": "0.14.1"
   }
 }

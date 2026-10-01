@@ -11,9 +11,6 @@ importers:
       pi-vim:
         specifier: 0.14.1
         version: 0.14.1(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0))(@earendil-works/pi-tui@0.85.1)
-      typebox:
-        specifier: 1.1.38
-        version: 1.1.38
     devDependencies:
       '@earendil-works/pi-ai':
         specifier: ^0.85.1
@@ -24,6 +21,9 @@ importers:
       '@earendil-works/pi-tui':
         specifier: ^0.85.1
         version: 0.85.1
+      typebox:
+        specifier: 1.1.38
+        version: 1.1.38
 
 packages:
 
