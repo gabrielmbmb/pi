@@ -29,6 +29,6 @@
   },
   "packageManager": "pnpm@11.0.8",
   "dependencies": {
-    "pi-vim": "0.14.1"
+    "pi-vim": "0.14.2"
   }
 }

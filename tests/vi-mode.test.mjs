@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
 
 import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
@@ -38,6 +38,32 @@ test("loads the Vi editor integration and its help command", async (context) => 
 	assert.equal(notification.type, "info");
 	assert.match(notification.message, /INSERT/);
 	assert.match(notification.message, /VISUAL/);
+});
+
+test("loads without installed host peers when Pi has import-only exports", async (context) => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-vi-mode-esm-"));
+	context.after(() => rm(directory, { force: true, recursive: true }));
+
+	const extensionPath = join(directory, "extensions/vi-mode/index.ts");
+	await cp(resolve("extensions/vi-mode"), join(directory, "extensions/vi-mode"), { recursive: true });
+	await cp(await realpath("node_modules/pi-vim"), join(directory, "node_modules/pi-vim"), {
+		recursive: true,
+		filter: (source) => basename(source) !== "node_modules",
+	});
+	const hostDirectory = join(directory, "node_modules/@earendil-works/pi-coding-agent");
+	await mkdir(hostDirectory, { recursive: true });
+	// Ordinary imports use Pi's host mapping, but pi-vim's clipboard helper
+	// also resolves the package itself. It must tolerate import-only exports.
+	await writeFile(join(hostDirectory, "package.json"), JSON.stringify({
+		name: "@earendil-works/pi-coding-agent",
+		type: "module",
+		exports: { ".": { import: "./index.js" } },
+	}));
+
+	const result = await discoverAndLoadExtensions([extensionPath], directory, join(directory, "agent"));
+	assert.deepEqual(result.errors, []);
+	assert.equal(result.extensions.length, 1);
+	assert.ok(result.extensions[0].commands.has("vi-help"));
 });
 
 test("highlights the inclusive character-wise Visual selection", () => {

@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       pi-vim:
-        specifier: 0.14.1
-        version: 0.14.1(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0))(@earendil-works/pi-tui@0.85.1)
+        specifier: 0.14.2
+        version: 0.14.2(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0))(@earendil-works/pi-tui@0.85.1)
     devDependencies:
       '@earendil-works/pi-ai':
         specifier: ^0.85.1
@@ -662,8 +662,8 @@ packages:
     resolution: {integrity: sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==}
     engines: {node: '>=8'}
 
-  pi-vim@0.14.1:
-    resolution: {integrity: sha512-m8/j84pGlu01b6aucqgDQQQcS4kU+B0ws6/LIKB/HMWb43xVFXLqdZN06Op5OhBm+9aDDUkzFfFp3ErrtwLNRQ==}
+  pi-vim@0.14.2:
+    resolution: {integrity: sha512-CFSKJvOCNToueIMyBgsujT+gHa4sAlLOnT4VYZ6iCGKJ7M24eCVWFKKnnMt6tmP1rDE6T7k/AqBrb6LWzCzRaQ==}
     peerDependencies:
       '@earendil-works/pi-coding-agent': '*'
       '@earendil-works/pi-tui': '>=0.74.0'
@@ -1460,7 +1460,7 @@ snapshots:
 
   path-key@3.1.1: {}
 
-  pi-vim@0.14.1(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0))(@earendil-works/pi-tui@0.85.1):
+  pi-vim@0.14.2(@earendil-works/pi-coding-agent@0.85.1(ws@8.21.0))(@earendil-works/pi-tui@0.85.1):
     dependencies:
       '@earendil-works/pi-coding-agent': 0.85.1(ws@8.21.0)
       '@earendil-works/pi-tui': 0.85.1
