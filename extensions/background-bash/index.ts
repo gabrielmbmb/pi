@@ -47,21 +47,17 @@ const CONTROL_CHARACTERS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 const INTERLINEAR_ANNOTATIONS = /[\uFFF9-\uFFFB]/g;
 
 const BACKGROUND_DESCRIPTION = [
-  "Set background:true to start the command without waiting. It returns a task id and an output file; stdout and stderr are written to that file.",
-  "Read the output file with the read tool to inspect progress. When the command exits, a completion message arrives automatically with the status, exit code, and output tail.",
-  "Do not poll. Stop a running task with bash_kill. Background commands have no TTY and stdin is closed.",
+  "background:true returns task_id and output_file immediately; stdout/stderr go to the file.",
+  "Completion automatically reports status, exit code, and output tail. No stdin or TTY.",
 ].join(" ");
 
 const BACKGROUND_PROMPT_SNIPPET =
   "Execute bash commands, optionally in the background with background:true";
 
 const BACKGROUND_PROMPT_GUIDELINES = [
-  "Use bash with background:true only for commands expected to outlive the current turn when you can continue with other work. Use foreground bash when you need the result before deciding the next step.",
-  "Always provide a short, specific description when using background:true; it identifies the task in results and completion messages.",
-  "After starting a background command, do not poll, sleep, or repeatedly read its log. Continue with other work or end your turn. The completion message arrives automatically and starts a new turn when the agent is idle.",
-  "Read the output file only when you need to inspect current progress, check a long-running server's startup, or read more output than the completion message included. EOF while reading a running task's log does not mean the command has finished.",
-  "Do not use background:true for interactive or TTY commands; stdin is closed. Do not use nohup, setsid, or a detached `&` to outlive the tool; the tool manages the process.",
-  "To stop a running background task, use bash_kill with its task_id. Do not use shell kill commands or PIDs.",
+  "Use background:true with a short description for long-running, noninteractive commands; otherwise use foreground. Never detach with nohup, setsid, or &.",
+  "After starting, continue other work or end your turn; completion starts a new turn automatically. Do not poll or sleep to wait.",
+  "Read output_file only for needed progress/startup checks or fuller output; EOF does not imply completion.",
 ];
 
 const terminalTaskStatuses = [
@@ -387,7 +383,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
     ),
     description: Type.Optional(
       Type.String({
-        description: "Short human-readable description of the command, used in results and completion messages",
+        description: "Short task label (provide when background:true)",
       }),
     ),
   });
@@ -800,8 +796,7 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
             text:
               `Started background task ${task.id} (${task.description}). ` +
               `Output file: ${task.outputFile}. ` +
-              "It is still running. Read the file to inspect progress; the completion message arrives automatically. " +
-              "Do not poll. If you have no other work, end your turn; the completion message will start the next one.",
+              "Completion will arrive automatically. Do not poll; continue other work or end your turn.",
           },
         ],
         details: undefined as BashToolDetails | undefined,
@@ -821,14 +816,11 @@ export default function backgroundBashExtension(pi: ExtensionAPI): void {
     name: "bash_kill",
     label: "bash_kill",
     description:
-      "Stop a background bash task started with background:true. Returns the task's final status. Use this instead of shell kill commands or PIDs.",
-    promptSnippet: "Stop a running background bash task by task id",
-    promptGuidelines: [
-      "Use bash_kill with the task_id from a background bash start result. Do not use shell kill commands or PIDs.",
-      "Calling bash_kill on a finished task is safe; it returns the terminal status without starting or sending anything.",
-    ],
+      "Stop a background task by task_id; returns final status. Safe if already finished.",
+    promptSnippet: "Stop a background bash task",
+    promptGuidelines: ["Stop background tasks with bash_kill(task_id), never shell kill or PIDs."],
     parameters: Type.Object({
-      task_id: Type.String({ description: "The background task id, for example bg-7f3a-1" }),
+      task_id: Type.String({ description: "Task id returned by bash" }),
     }),
     outputSchema: bashKillOutputSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
