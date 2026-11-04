@@ -1,41 +1,26 @@
 # Pi Resources
 
-Personal extensions, skills, prompts, and themes for Pi.
+Personal Pi extensions, skills, prompts, and themes.
 
 ## Install
-
-Install the repository as one Pi package:
 
 ```bash
 pi install git:github.com/gabrielmbmb/pi
 ```
 
-Pi clones the package once. To load only selected resources, run `pi config` and disable the extensions you do not want. The equivalent package filter in `~/.pi/agent/settings.json` is:
-
-```json
-{
-  "packages": [
-    {
-      "source": "git:github.com/gabrielmbmb/pi",
-      "extensions": ["extensions/banner.ts", "extensions/worktree.ts"],
-      "skills": [],
-      "prompts": [],
-      "themes": []
-    }
-  ]
-}
-```
+Use `pi config` to enable only the resources you want.
 
 ## Extensions
 
 | Extension | Description |
 | --- | --- |
-| [`banner`](extensions/banner.ts) | Replaces Pi's startup header with an animated rainbow `Pi` banner, loaded-extension names, and loaded context files. |
-| [`usage-monitor`](extensions/usage-monitor/index.ts) | Shows provider usage / balance below the prompt line. Supports OpenRouter, OpenAI Codex, and OpenCode Go (5h / weekly / monthly quota windows). |
-| [`vi-mode`](extensions/vi-mode/index.ts) | Adds Insert, Normal, character-wise Visual, and line-wise Visual prompt editing with Vim motions, operators, text objects, counts, registers, undo/redo, and a Pi-aware Ex command bridge. See the [shortcut guide](extensions/vi-mode/README.md). |
-| [`worktree`](extensions/worktree.ts) | Reuses a branch's registered checkout (regardless of directory name), or creates `.agents/worktrees/<name>` from the current branch or a selected base via `--worktree <name> --worktree-base <branch>`, `/worktree <name> --base <branch>`, or the model-callable `worktree_switch` tool, then starts or switches Pi to it. Resume a worktree session from another checkout with `--worktree <name> --worktree-session <session-id>`. |
+| [`background-bash`](extensions/background-bash/index.ts) | Adds `background:true` to `bash`, private output logs, completion messages, `bash_kill`, and `/bg` task management. |
+| [`banner`](extensions/banner.ts) | Replaces Pi's startup header with an animated rainbow `Pi` banner. |
+| [`usage-monitor`](extensions/usage-monitor/index.ts) | Shows provider usage / balance below the prompt line. |
+| [`vi-mode`](extensions/vi-mode/index.ts) | Vim-style prompt editing. See the [shortcut guide](extensions/vi-mode/README.md). |
+| [`worktree`](extensions/worktree.ts) | Creates or reuses Git worktrees and switches Pi into them via flags, `/worktree`, or `worktree_switch`. |
 
-The banner expects Pi's native startup listing to be disabled with `"quietStartup": true` in `~/.pi/agent/settings.json` (or via `/settings`).
+The banner expects `"quietStartup": true` in `~/.pi/agent/settings.json`.
 
 ## Prompts
 
