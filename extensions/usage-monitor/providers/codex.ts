@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { formatResetDuration } from "./format.ts";
 import type { ProviderUsageHandler, UsageInfo, UsageWindow } from "./types.ts";
 
 // ── Response shapes ─────────────────────────────────────────────────
@@ -312,19 +313,8 @@ export const codexHandler: ProviderUsageHandler = {
 
     for (const window of windows) {
       if (!window.resetsAt) continue;
-
-      const mins = Math.max(0, Math.round((window.resetsAt - Date.now()) / 60000));
-      if (mins <= 0) continue;
-
-      const days = Math.floor(mins / 1440);
-      const hours = Math.floor((mins % 1440) / 60);
-      const min = mins % 60;
-      const when = days > 0
-        ? `${days}d ${hours}h`
-        : hours > 0
-          ? `${hours}h ${min}m`
-          : `${min}m`;
-      detailParts.push(theme.fg("dim", `${window.label} resets in ${when}`));
+      const when = formatResetDuration(window.resetsAt);
+      if (when) detailParts.push(theme.fg("dim", `${window.label} resets in ${when}`));
     }
 
     // Extra credits

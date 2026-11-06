@@ -9,9 +9,11 @@
  * - openrouter
  * - openai-codex
  * - opencode-go
+ * - claude-code
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { claudeCodeHandler } from "./providers/claude-code.ts";
 import { codexHandler, consumeResetCredit, fetchResetCreditDetails } from "./providers/codex.ts";
 import { opencodeGoHandler } from "./providers/opencode-go.ts";
 import { openRouterHandler } from "./providers/openrouter.ts";
@@ -20,6 +22,7 @@ import type { ProviderUsageHandler, UsageInfo } from "./providers/types.ts";
 export default function usageMonitor(pi: ExtensionAPI) {
   // ── Handler registry ──────────────────────────────────────────────
   const handlers = new Map<string, ProviderUsageHandler>();
+  handlers.set(claudeCodeHandler.provider, claudeCodeHandler);
   handlers.set(codexHandler.provider, codexHandler);
   handlers.set(openRouterHandler.provider, openRouterHandler);
   handlers.set(opencodeGoHandler.provider, opencodeGoHandler);
@@ -39,11 +42,17 @@ export default function usageMonitor(pi: ExtensionAPI) {
     provider: string,
     ctx: ExtensionContext,
   ): Promise<string | undefined> {
+    const handler = handlers.get(provider);
+
+    // Some providers own their credentials and only expose a placeholder
+    // through Pi auth (Claude Code), so skip Pi auth for them.
+    if (handler?.skipPiAuth) return handler.resolveApiKey?.(ctx);
+
     const auth = await ctx.modelRegistry.getProviderAuth(provider);
     if (auth?.auth.apiKey) return auth.auth.apiKey;
 
     // Fall back to provider-specific resolution (e.g. OpenCode Go's auth.json)
-    return handlers.get(provider)?.resolveApiKey?.(ctx);
+    return handler?.resolveApiKey?.(ctx);
   }
 
   function showWidget(

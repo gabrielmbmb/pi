@@ -56,6 +56,11 @@ export interface ProviderUsageHandler {
   fetchUsage(apiKey: string, signal?: AbortSignal): Promise<UsageInfo>;
   /** Resolve an API key when pi auth has none (e.g. from a tool's own auth file) */
   resolveApiKey?(ctx: ExtensionContext): Promise<string | undefined>;
+  /**
+   * Skip Pi auth and resolve credentials only through `resolveApiKey`.
+   * Needed when Pi only exposes a placeholder credential (Claude Code).
+   */
+  skipPiAuth?: boolean;
   /** Render usage info into lines for ctx.ui.setWidget */
   formatWidget(usage: UsageInfo, ctx: ExtensionContext): string[];
 }
