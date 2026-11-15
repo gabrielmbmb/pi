@@ -16,6 +16,7 @@ Use `pi config` to enable only the resources you want.
 | --- | --- |
 | [`background-bash`](extensions/background-bash/index.ts) | Adds `background:true` to `bash`, private output logs, completion messages, `bash_kill`, and `/bg` task management. |
 | [`banner`](extensions/banner.ts) | Replaces Pi's startup header with an animated rainbow `Pi` banner. |
+| [`sticky-user-message`](extensions/sticky-user-message/index.ts) | Pins the user message above the fullscreen transcript viewport as you scroll. |
 | [`usage-monitor`](extensions/usage-monitor/index.ts) | Shows provider usage / balance below the prompt line (OpenRouter, Codex, OpenCode Go, Claude Code). |
 | [`vi-mode`](extensions/vi-mode/index.ts) | Vim-style prompt editing. See the [shortcut guide](extensions/vi-mode/README.md). |
 | [`worktree`](extensions/worktree.ts) | Creates or reuses Git worktrees and switches Pi into them via flags, `/worktree`, or `worktree_switch`. |
